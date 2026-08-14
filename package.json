@@ -1,0 +1,75 @@
+{
+  "name": "@compn3rd/pi-web-automations",
+  "version": "0.1.0",
+  "description": "Durable, machine-local scheduled Pi jobs for PI WEB.",
+  "license": "MIT",
+  "author": "Marc Kassubeck",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "validate:dist": "node scripts/validate-dist.mjs",
+    "pack:dry": "npm pack --dry-run --json",
+    "pack:validate": "node scripts/validate-pack.mjs",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build && npm run validate:dist && npm run pack:validate",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "croner": "^10.0.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@jmfederico/pi-web": "github:CompN3rd/pi-web#feat/background-service-plugins",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.13.3",
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0",
+    "happy-dom": "^20.11.1",
+    "lit": "^3.3.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.63.0",
+    "vitest": "^4.1.10"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CompN3rd/pi-web-automations.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CompN3rd/pi-web-automations/issues"
+  },
+  "homepage": "https://github.com/CompN3rd/pi-web-automations#readme",
+  "packageManager": "npm@11.17.0",
+  "keywords": [
+    "pi-package",
+    "pi-web",
+    "automations",
+    "scheduler",
+    "coding-agent"
+  ],
+  "piWeb": {
+    "plugins": [
+      {
+        "id": "automations",
+        "browserRoot": "dist/browser",
+        "module": "dist/browser/pi-web-plugin.js",
+        "serverModule": "dist/server-plugin.js",
+        "machineSpecific": true
+      }
+    ]
+  }
+}

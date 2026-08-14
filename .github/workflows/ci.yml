@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Use HTTPS for the public PI WEB Git dependency
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify and validate package artifact
+        run: npm run verify
+
+      - name: Inspect dry-run package manifest
+        run: npm run pack:dry
