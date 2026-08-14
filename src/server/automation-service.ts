@@ -393,7 +393,9 @@ export class AutomationService {
       if (this.isStoreClosed()) return;
       const latest = this.store.getRun(context.runId);
       if (latest === undefined || isTerminalRunStatus(latest.status)) return;
-      const usage = context.session === undefined ? undefined : await this.runner.snapshot(context.session, this.nowIso());
+      const usage = context.session === undefined || latest.sessionId === undefined
+        ? undefined
+        : await this.runner.snapshot(context.session, this.nowIso());
       if (latest.status === "cancelling" || context.cancellationKind !== undefined) {
         this.finishCancellation(context.runId, latest.cancellationKind ?? context.cancellationKind ?? "user", usage);
       } else {
@@ -447,22 +449,14 @@ export class AutomationService {
 
   private async forceStop(context: ActiveAutomationRun): Promise<void> {
     const run = this.store.getRun(context.runId);
-    if (run === undefined || isTerminalRunStatus(run.status)) return;
-    const usage = context.session === undefined ? undefined : await this.runner.snapshot(context.session, this.nowIso());
-    if (context.session !== undefined) {
-      try {
-        await this.runner.forceStop(context.session);
-      } catch (error) {
-        this.logger.warn({ runId: context.runId, err: error }, "automation force stop failed");
-      }
-    }
+    if (run === undefined || isTerminalRunStatus(run.status) || context.session === undefined) return;
+    await this.runner.forceStop(context.session);
     this.store.finishRun(context.runId, {
       status: "unknown",
       completedAt: this.nowIso(),
       reason: "force_stop_unconfirmed",
       error: "The run did not acknowledge cancellation before the force-stop deadline",
       forceStopped: true,
-      ...(usage === undefined ? {} : { usage }),
     });
     clearContextTimers(context);
     if (this.active.get(context.runId) === context) this.active.delete(context.runId);

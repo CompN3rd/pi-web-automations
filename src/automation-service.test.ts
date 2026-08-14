@@ -142,11 +142,12 @@ describe("AutomationService", () => {
     expect(service.listRuns(scope)[0]).toMatchObject({ status: "cancelled", usage });
   });
 
-  it("force-stops a run when soft abort never settles", async () => {
+  it("force-stops a run without waiting for a non-settling usage snapshot", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-24T12:00:00.000Z"));
     const runner = new FakeRunner();
     runner.abort = () => { runner.abortCalls += 1; return new Promise<void>(() => undefined); };
+    runner.snapshot = () => new Promise<AutomationUsageSnapshot>(() => undefined);
     const { service } = fixture(runner);
     const automation = service.create(scope, draft());
     const queued = service.runNow(automation.id, scope, automation.revision);
@@ -157,6 +158,26 @@ describe("AutomationService", () => {
 
     expect(runner.forceStopCalls).toBe(1);
     expect(service.listRuns(scope)[0]).toMatchObject({ status: "unknown", reason: "force_stop_unconfirmed", attempt: { forceStopped: true } });
+  });
+
+  it("keeps cancellation and overlap protection honest when force-stop rejects", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-24T12:00:00.000Z"));
+    const runner = new FakeRunner();
+    runner.abort = () => { runner.abortCalls += 1; return new Promise<void>(() => undefined); };
+    runner.forceStop = () => { runner.forceStopCalls += 1; return Promise.reject(new Error("force stop unavailable")); };
+    const { service } = fixture(runner);
+    const automation = service.create(scope, draft());
+    const queued = service.runNow(automation.id, scope, automation.revision);
+    await flushMicrotasks();
+    service.cancel(queued.id, scope);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushMicrotasks();
+
+    expect(runner.forceStopCalls).toBe(1);
+    expect(service.listRuns(scope)[0]).toMatchObject({ status: "cancelling", cancellationKind: "user" });
+    expect(() => service.runNow(automation.id, scope, automation.revision)).toThrow("already has an active run");
+    await expect(service.stop(0)).resolves.toBeUndefined();
   });
 
   it("starts the execution timeout only after lease acquisition", async () => {
@@ -177,6 +198,23 @@ describe("AutomationService", () => {
     await flushMicrotasks();
     expect(runner.abortCalls).toBe(1);
     expect(service.listRuns(scope)[0]).toMatchObject({ status: "timed_out", cancellationKind: "timeout" });
+  });
+
+  it("releases a registered lease when initial session inspection fails", async () => {
+    const runner = new FakeRunner();
+    runner.create = (input, onCreated) => {
+      runner.createInputs.push(input);
+      onCreated(runner.created);
+      return Promise.reject(new Error("snapshot failed"));
+    };
+    runner.snapshot = () => new Promise<AutomationUsageSnapshot>(() => undefined);
+    const { service } = fixture(runner);
+    const automation = service.create(scope, draft());
+    service.runNow(automation.id, scope, automation.revision);
+    await flushMicrotasks();
+
+    expect(runner.releaseCalls).toBe(1);
+    expect(service.listRuns(scope)[0]).toMatchObject({ status: "failed", error: "snapshot failed" });
   });
 
   it("marks prompt terminal failures as failed runs", async () => {

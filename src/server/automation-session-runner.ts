@@ -40,10 +40,9 @@ export class AutomationSessionRunner {
       ...(input.model.mode === "fixed" ? { model: { provider: input.model.provider, id: input.model.id } } : {}),
       ...(input.thinking.mode === "fixed" ? { thinkingLevel: input.thinking.level } : {}),
     });
-    const snapshot = await lease.snapshot();
-    const created = createdFromSnapshot(lease, snapshot);
+    const created: CreatedAutomationSession = { sessionId: lease.sessionId, lease };
     onCreated(created);
-    return created;
+    return createdFromSnapshot(lease, await lease.snapshot());
   }
 
   async run(session: CreatedAutomationSession, prompt: string, capturedAt: () => string): Promise<AutomationUsageSnapshot> {

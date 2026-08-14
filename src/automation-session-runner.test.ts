@@ -29,6 +29,29 @@ describe("AutomationSessionRunner", () => {
     await expect(runner.run(created, "prompt", () => "2026-01-01T00:00:00.000Z")).resolves.toMatchObject({ tokens: { total: 6 } });
   });
 
+  it("registers a created lease before reading its initial snapshot", async () => {
+    const snapshotError = new Error("snapshot failed");
+    const created: { lease?: BackgroundSessionLease } = {};
+    const sessions: BackgroundSessionService = {
+      listModels: () => [],
+      create: () => Promise.resolve({
+        sessionId: "session-with-broken-snapshot",
+        prompt: () => Promise.reject(new Error("unused")),
+        snapshot: () => Promise.reject(snapshotError),
+        abort: () => Promise.resolve(),
+        forceStop: () => Promise.resolve(),
+        release: () => Promise.resolve(),
+      }),
+    };
+    const runner = new AutomationSessionRunner(sessions);
+
+    await expect(runner.create(
+      { projectId: "project-1", workspaceId: "workspace-1", model: { mode: "default" }, thinking: { mode: "default" } },
+      (session) => { created.lease = session.lease; },
+    )).rejects.toBe(snapshotError);
+    expect(created.lease?.sessionId).toBe("session-with-broken-snapshot");
+  });
+
   it("turns a failed terminal prompt status into a failed run and keeps unknown cost absent", async () => {
     const { runner } = fixture("failed");
     const created = await runner.create({ projectId: "project-1", workspaceId: "workspace-1", model: { mode: "default" }, thinking: { mode: "default" } }, () => undefined);

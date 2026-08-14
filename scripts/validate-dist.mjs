@@ -4,9 +4,10 @@ import { join } from "node:path";
 const requiredEntries = ["dist/browser/pi-web-plugin.js", "dist/server-plugin.js"];
 for (const entry of requiredEntries) await readFile(entry);
 
+const moduleReference = String.raw`(?:\b(?:import|export)\s+(?:(?:type\s+)?[^"';]*?\bfrom\s*)?|\bimport\s*\()\s*["']`;
 const forbidden = [
-  { label: "PI WEB runtime import", pattern: /(?:from\s*|import\s*\()\s*["']@jmfederico\/pi-web/ },
-  { label: "private PI WEB source path", pattern: /(?:pi-web\/src|pi-web\/dist|\.\.\/.*pi-web)/ },
+  { label: "PI WEB runtime import", pattern: new RegExp(`${moduleReference}@jmfederico/pi-web(?:/[^"']*)?["']`, "u") },
+  { label: "private PI WEB source path", pattern: /(?:pi-web\/src|pi-web\/dist|\.\.\/.*pi-web)/u },
 ];
 for (const path of await javascriptFiles("dist")) {
   const source = await readFile(path, "utf8");

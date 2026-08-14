@@ -2,7 +2,9 @@
 
 `@compn3rd/pi-web-automations` provides durable, machine-local scheduled Pi jobs for a selected PI WEB workspace. It is a paired browser/server plugin with the id `automations` and is maintained separately from PI WEB.
 
-> **Pre-release host requirement:** version 0.1.0 is an unpublished development release. It requires the background-service plugin APIs being developed for [PI WEB issue #159](https://github.com/jmfederico/pi-web/issues/159), currently available on [`CompN3rd/pi-web#feat/background-service-plugins`](https://github.com/CompN3rd/pi-web/tree/feat/background-service-plugins). It is **not compatible with the currently released PI WEB host**. The Git branch is a temporary development-only type dependency. Before the first npm release, it must be replaced by the first compatible released `@jmfederico/pi-web` semver dependency/peer range.
+> **Pre-release host requirement:** version 0.1.0 is an unpublished development release. It requires the background-service plugin APIs being developed for [PI WEB issue #159](https://github.com/jmfederico/pi-web/issues/159), currently pinned to [`CompN3rd/pi-web@e9cd514`](https://github.com/CompN3rd/pi-web/commit/e9cd5148ea4e71f4094ec6a7e5b953500d40b2a7). It is **not compatible with the currently released PI WEB host**. This temporary development-only Git dependency downloads the heavy PI WEB development dependency graph and runs the host repository's Git dependency `prepare` build during installation. Before the first npm release, it must be replaced by the first compatible released `@jmfederico/pi-web` semver dependency/peer range.
+
+**Extraction provenance:** source repository [`CompN3rd/pi-web`](https://github.com/CompN3rd/pi-web), branch `feat/plugin-automations`, source commit [`32962445305c5ec52d88bb19fc71357277e13e63`](https://github.com/CompN3rd/pi-web/commit/32962445305c5ec52d88bb19fc71357277e13e63), paths `pi-web-plugins/automations`.
 
 ## Install from source (current workflow)
 
@@ -147,7 +149,7 @@ npm run pack:dry
 
 `npm run pack:validate` creates and inspects a real package tarball, verifies both metadata entry files, rejects files outside `dist`, `README.md`, `LICENSE`, and npm's required `package.json`, then removes the tarball. The npm publish allowlist is `dist`, `README.md`, and `LICENSE`.
 
-The only production dependencies are `better-sqlite3` and `croner`. The temporary Git dependency on PI WEB is dev-only so TypeScript checks the unreleased public contracts. The first publish remains blocked until issue #159 lands in a released host and `package.json` can declare a concrete compatible semver/peer range instead.
+The only production dependencies are `better-sqlite3` and `croner`. The temporary, commit-pinned HTTPS Git dependency on PI WEB is dev-only so TypeScript checks the unreleased public contracts; it makes development installs substantially heavier because npm installs the host's development graph and runs its `prepare` script. The first publish remains blocked until issue #159 lands in a released host and `package.json` can declare a concrete compatible semver/peer range instead.
 
 ## License
 
