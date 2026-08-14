@@ -16,7 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Pin Windows to the VS 2022 image so node-gyp can compile native
+        # dependencies when a prebuild is unavailable (notably Node 22).
+        os: [ubuntu-latest, windows-2022]
         node: [22.19.0, 24]
     steps:
       - name: Checkout
