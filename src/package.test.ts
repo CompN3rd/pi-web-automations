@@ -23,7 +23,10 @@ describe("standalone Automations package metadata", () => {
     expect(record(packageRecord["devDependencies"])["@jmfederico/pi-web"]).toBe("^1.202609.1");
     expect(record(packageRecord["pi"])["extensions"]).toEqual(["dist/companion.js"]);
     expect(record(packageRecord["devDependencies"])["@earendil-works/pi-coding-agent"]).toBe("^0.87.1");
-    expect(packageRecord["peerDependencies"]).toBeUndefined();
+    expect(record(packageRecord["peerDependencies"])).toEqual({
+      "@earendil-works/pi-coding-agent": "*",
+      "@jmfederico/pi-web": "^1.202609.1",
+    });
     expect(record(packageRecord["engines"])["node"]).toBe(">=22.19.0");
     expect(record(packageRecord["piWeb"])["plugins"]).toEqual([{
       id: "automations",

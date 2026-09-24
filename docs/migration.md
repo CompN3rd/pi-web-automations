@@ -30,7 +30,7 @@ npm run verify
 npm run pack:dry
 ```
 
-CI runs the same checks against the released host package on Windows and Linux. Production dependencies remain `better-sqlite3` and `croner`; the host and Pi coding agent are development/type dependencies. The package ships browser and server entries, the companion, and these docs. Import and real-pack validators run in `npm run verify`. The package itself is not yet published.
+CI runs the same checks against the released host package on Windows and Linux. Direct runtime dependencies remain `better-sqlite3` and `croner`. PI WEB `^1.202609.1` is a runtime peer (the server imports its public capability constants); the Pi coding agent is also a peer, supplied by Pi when loading the companion. Both are development dependencies for local typechecking. The package ships browser and server entries, the companion, and these docs. Import, real-pack and clean production-only tarball-install validators run in `npm run verify`. The install check verifies the server and companion imports against npm-resolved peers, not an end-to-end scheduler run in a hosted Pi profile. The package itself is not yet published.
 
 ## Install and activate
 

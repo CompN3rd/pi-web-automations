@@ -20,12 +20,17 @@
     "validate:dist": "node scripts/validate-dist.mjs",
     "pack:dry": "npm pack --dry-run --json",
     "pack:validate": "node scripts/validate-pack.mjs",
-    "verify": "npm run typecheck && npm run lint && npm test && npm run build && npm run validate:dist && npm run pack:validate",
+    "install:validate": "node scripts/validate-install.mjs",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build && npm run validate:dist && npm run pack:validate && npm run install:validate",
     "prepack": "npm run build"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
     "croner": "^10.0.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@jmfederico/pi-web": "^1.202609.1"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.87.1",
