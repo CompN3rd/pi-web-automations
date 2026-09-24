@@ -39,7 +39,7 @@ function context(request: (operation: string, input: JsonValue) => Promise<JsonV
     machine: { id: machineId, name: machineId, kind: "local" },
     workspace: { id: workspaceId, projectId: "project-1", path: "/repo", label: workspaceId, isMain: true },
     files: fileMethods(),
-    backend: { request },
+    peer: { request },
     host: { requestRender },
     prompt: { insertText() { return undefined; }, getText: () => "", getSelection: () => null },
     terminal: { open() { return undefined; }, runCommand: () => Promise.reject(new Error("not used")) },
@@ -211,7 +211,7 @@ describe("AutomationsController", () => {
 
   it("filters thinking levels to the selected model", () => {
     expect(availableThinkingLevels(snapshot(), { mode: "fixed", provider: "anthropic", id: "sonnet" })).toEqual(["low", "high"]);
-    expect(availableThinkingLevels(snapshot(), { mode: "fixed", provider: "other", id: "missing" })).toEqual([]);
+    expect(availableThinkingLevels(snapshot(), { mode: "fixed", provider: "other", id: "missing" })).toEqual(["off", "low", "high"]);
     expect(availableThinkingLevels(snapshot(), { mode: "default" })).toEqual(["off", "low", "high"]);
   });
 });

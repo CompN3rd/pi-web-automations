@@ -18,9 +18,11 @@ describe("standalone Automations package metadata", () => {
     expect(packageRecord["private"]).toBeUndefined();
     expect(packageRecord["license"]).toBe("MIT");
     expect(packageRecord["type"]).toBe("module");
-    expect(packageRecord["files"]).toEqual(["dist", "README.md", "LICENSE"]);
+    expect(packageRecord["files"]).toEqual(["dist", "docs", "README.md", "LICENSE"]);
     expect(record(packageRecord["dependencies"])).toEqual({ "better-sqlite3": "^13.0.3", croner: "^10.0.1" });
-    expect(record(packageRecord["devDependencies"])["@jmfederico/pi-web"]).toBe("git+https://github.com/CompN3rd/pi-web.git#e9cd5148ea4e71f4094ec6a7e5b953500d40b2a7");
+    expect(record(packageRecord["devDependencies"])["@jmfederico/pi-web"]).toBe("^1.202609.1");
+    expect(record(packageRecord["pi"])["extensions"]).toEqual(["dist/companion.js"]);
+    expect(record(packageRecord["devDependencies"])["@earendil-works/pi-coding-agent"]).toBe("^0.87.1");
     expect(packageRecord["peerDependencies"]).toBeUndefined();
     expect(record(packageRecord["engines"])["node"]).toBe(">=22.19.0");
     expect(record(packageRecord["piWeb"])["plugins"]).toEqual([{
@@ -34,12 +36,23 @@ describe("standalone Automations package metadata", () => {
 
   it.each([
     ["side-effect import", `import "@jmfederico/pi-web/src/private.js";`],
+    ["non-capability public import", `import { imaginaryControl } from "@jmfederico/pi-web/server-plugin-api";`],
     ["re-export", `export { privateApi } from "@jmfederico/pi-web/dist/private.js";`],
   ])("rejects emitted PI WEB %s references", async (_label, source) => {
     const result = await validateDistFixture(source);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("PI WEB runtime import found in");
   });
+  it("allows only the public server runtime capability imports", async () => {
+    const result = await validateDistFixture('import { PI_WEB_HOST_PI_SESSIONS_CAPABILITY } from "@jmfederico/pi-web/server-plugin-api";');
+    expect(result.status).toBe(0);
+  });
+  it("rejects runtime Pi extension imports", async () => {
+    const result = await validateDistFixture('import { ExtensionAPI } from "@earendil-works/pi-coding-agent";');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Pi imports must remain companion type boundaries");
+  });
+
 });
 
 async function validateDistFixture(source: string): Promise<{ status: number | null; stderr: string }> {
@@ -48,6 +61,7 @@ async function validateDistFixture(source: string): Promise<{ status: number | n
     await mkdir(join(directory, "dist", "browser"), { recursive: true });
     await writeFile(join(directory, "dist", "browser", "pi-web-plugin.js"), "export default {};\n");
     await writeFile(join(directory, "dist", "server-plugin.js"), "export default {};\n");
+    await writeFile(join(directory, "dist", "companion.js"), "export default {};\n");
     await writeFile(join(directory, "dist", "forbidden.js"), source);
     const result = spawnSync(process.execPath, [resolve("scripts/validate-dist.mjs")], { cwd: directory, encoding: "utf8" });
     return { status: result.status, stderr: result.stderr };

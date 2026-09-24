@@ -19,13 +19,13 @@ if (typeof report !== "object" || report === null || !Array.isArray(report.files
 
 try {
   const paths = report.files.map((entry) => entry.path);
-  const required = ["package.json", "README.md", "LICENSE", "dist/browser/pi-web-plugin.js", "dist/server-plugin.js"];
+  const required = ["package.json", "README.md", "LICENSE", "dist/browser/pi-web-plugin.js", "dist/server-plugin.js", "dist/companion.js", "docs/migration.md"];
   for (const path of required) {
     if (!paths.includes(path)) throw new Error(`Packed artifact is missing ${path}`);
   }
-  const unexpected = paths.filter((path) => path !== "package.json" && path !== "README.md" && path !== "LICENSE" && !path.startsWith("dist/"));
+  const unexpected = paths.filter((path) => path !== "package.json" && path !== "README.md" && path !== "LICENSE" && !path.startsWith("dist/") && !path.startsWith("docs/"));
   if (unexpected.length > 0) throw new Error(`Packed artifact contains files outside the allowlist: ${unexpected.join(", ")}`);
-  console.log(`Validated ${paths.length} packed files (${report.filename}); only package.json and the declared dist/README/LICENSE allowlist are present.`);
+  console.log(`Validated ${paths.length} packed files (${report.filename}); only package.json and the declared dist/docs/README/LICENSE allowlist are present.`);
 } finally {
   await unlink(report.filename).catch(() => undefined);
 }

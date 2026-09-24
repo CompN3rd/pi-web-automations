@@ -87,7 +87,7 @@ export interface AutomationRunListOptions {
 }
 
 export class AutomationStoreConflictError extends Error {
-  constructor(readonly kind: "duplicate-name" | "revision" | "active-run", message: string) {
+  constructor(readonly kind: "duplicate-name" | "revision" | "active-run" | "unconfirmed-run", message: string) {
     super(message);
   }
 }
@@ -225,7 +225,7 @@ export class AutomationStore {
       if (current === undefined || !current.enabled || current.revision !== definition.revision || current.nextRunAt !== definition.nextRunAt) {
         throw new Error("Automation schedule changed before the occurrence could be claimed");
       }
-      const overlapping = this.hasActiveRun(definition.id);
+      const overlapping = this.hasActiveRun(definition.id) || this.hasUnknownRun(definition.id);
       const run = runFromDefinition(definition, {
         id: runId,
         source: "scheduled",
@@ -245,6 +245,7 @@ export class AutomationStore {
 
   createManualRun(definition: AutomationDefinition, runId: string, now: string): AutomationRun {
     return this.db.transaction(() => {
+      if (this.hasUnknownRun(definition.id)) throw new AutomationStoreConflictError("unconfirmed-run", "Automation blocked by unconfirmed work; inspect Sessions before creating a replacement");
       if (this.hasActiveRun(definition.id)) throw new AutomationStoreConflictError("active-run", "Automation already has an active run");
       const run = runFromDefinition(definition, { id: runId, source: "manual", scheduledFor: now, queuedAt: now, status: "queued" });
       this.insertRun(run);
@@ -330,6 +331,21 @@ export class AutomationStore {
     })();
   }
 
+  recordSession(runId: string, sessionId: string): void {
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE automation_runs SET session_id = ? WHERE id = ?").run(sessionId, runId);
+      this.db.prepare("UPDATE automation_attempts SET session_id = ? WHERE run_id = ?").run(sessionId, runId);
+    })();
+  }
+
+  hasUnknownRun(automationId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM automation_runs WHERE automation_id = ? AND status = 'unknown' LIMIT 1").get(automationId) !== undefined;
+  }
+
+  private pauseUnconfirmed(automationId: string): void {
+    this.db.prepare("UPDATE automations SET enabled = 0, next_run_at = NULL, tested_revision = NULL WHERE id = ?").run(automationId);
+  }
+
   requestCancellation(runId: string, kind: "user" | "timeout", at: string): AutomationRun {
     return this.db.transaction(() => {
       const current = this.requireRun(runId);
@@ -388,6 +404,7 @@ export class AutomationStore {
         input.usage === undefined ? null : stringify(input.usage),
         runId,
       );
+      if (input.status === "unknown") this.pauseUnconfirmed(current.automationId);
       if (input.status === "completed" && current.source === "manual") {
         this.db.prepare(`
           UPDATE automations SET tested_revision = ?, updated_at = ?
@@ -415,6 +432,8 @@ export class AutomationStore {
           WHERE run_id = ? AND status IN ('starting', 'running', 'aborting')
         `).run(at, row.id);
       }
+      // Also fence unknown rows inherited from earlier versions.
+      for (const row of this.db.prepare<[], { automation_id: string }>("SELECT DISTINCT automation_id FROM automation_runs WHERE status = 'unknown'").all()) this.pauseUnconfirmed(row.automation_id);
       return rows.map((row) => this.requireRun(row.id));
     })();
   }
@@ -425,6 +444,7 @@ export class AutomationStore {
       SELECT 1 AS found FROM automation_runs
       WHERE automation_id = ? AND status IN (${placeholders}) LIMIT 1
     `).get(automationId, ...ACTIVE_RUN_STATUSES);
+    // Unknown outcomes fence future execution, but do not prevent soft deletion.
     return row !== undefined;
   }
 
@@ -736,7 +756,7 @@ function parseStoredUsage(value: string): AutomationUsageSnapshot {
   const record = parseStoredRecord(value);
   const scope = storedString(record, "scope");
   const quality = storedString(record, "quality");
-  if (scope !== "root_session") throw new Error(`Invalid automation usage scope in database: ${scope}`);
+  if (scope !== "root_session" && scope !== "assistant_messages") throw new Error(`Invalid automation usage scope in database: ${scope}`);
   if (quality !== "estimated" && quality !== "partial" && quality !== "provider_reported" && quality !== "unknown") {
     throw new Error(`Invalid automation usage quality in database: ${quality}`);
   }

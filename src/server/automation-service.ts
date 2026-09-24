@@ -17,7 +17,7 @@ import {
   validateAutomationTimeoutMs,
   validateAutomationTrigger,
 } from "./automation-schedule.js";
-import { AutomationSessionRunner, type CreatedAutomationSession } from "./automation-session-runner.js";
+import { AutomationSessionRunner, AutomationExecutionUnknownError, AutomationPromptError, type CreatedAutomationSession } from "./automation-session-runner.js";
 import { AutomationStore, AutomationStoreConflictError, isTerminalRunStatus } from "./automation-store.js";
 
 const KNOWN_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -39,7 +39,7 @@ interface ActiveAutomationRun {
   session?: CreatedAutomationSession;
   cancellationKind?: "user" | "timeout";
   timeout?: ReturnType<typeof setTimeout>;
-  forceStopTimer?: ReturnType<typeof setTimeout>;
+  cancellationTimer?: ReturnType<typeof setTimeout>;
   abortStarted: boolean;
   abortPromise?: Promise<void>;
   promise?: Promise<void>;
@@ -69,10 +69,11 @@ export class AutomationService {
   private ticking = false;
   private stopping = false;
   private storeClosed = false;
+  private disposeRequested = false;
 
   constructor(
     private readonly store: AutomationStore,
-    private readonly runner: Pick<AutomationSessionRunner, "models" | "create" | "run" | "snapshot" | "abort" | "forceStop" | "release">,
+    private readonly runner: Pick<AutomationSessionRunner, "models" | "create" | "run" | "snapshot" | "abort" | "release">,
     private readonly logger: AutomationServiceLogger = noopLogger,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -89,30 +90,22 @@ export class AutomationService {
     this.pollTimer.unref();
   }
 
-  async stop(waitMs = DEFAULT_AUTOMATION_ABORT_GRACE_MS + 250): Promise<void> {
+  /** Lifetime ingress is already closed: do not attempt cancellation over a revoked connection. */
+  stop(): Promise<void> {
     this.stopping = true;
     if (this.pollTimer !== undefined) clearInterval(this.pollTimer);
     this.pollTimer = undefined;
     for (const context of this.active.values()) {
-      if (context.timeout !== undefined) {
-        clearTimeout(context.timeout);
-        delete context.timeout;
-      }
-      const run = this.store.getRun(context.runId);
-      if (run !== undefined && !isTerminalRunStatus(run.status)) {
-        const cancelling = this.store.requestCancellation(run.id, "user", this.nowIso());
-        context.cancellationKind = cancelling.cancellationKind ?? "user";
-      } else {
-        context.cancellationKind = "user";
-      }
-      this.observe(this.beginAbort(context), { runId: context.runId }, "automation abort failed");
+      clearContextTimers(context);
+      this.markUnknown(context, "Plugin stopped before completion was confirmed; inspect Sessions. Work may continue.");
+      if (context.session) this.observe(this.runner.release(context.session), { runId: context.runId }, "automation connection close failed");
     }
-    await this.waitForActiveDrain(waitMs);
-    await Promise.allSettled([...this.active.values()].map((context) => this.forceStop(context)));
+    return Promise.resolve();
   }
 
   dispose(): void {
-    if (this.storeClosed) return;
+    this.disposeRequested = true;
+    if (this.storeClosed || this.active.size > 0) return;
     this.storeClosed = true;
     this.store.close();
   }
@@ -191,6 +184,7 @@ export class AutomationService {
     let trigger = request.trigger === undefined ? current.trigger : validateAutomationTrigger(request.trigger, now);
     const enabled = request.enabled ?? (definitionChanged ? false : current.enabled);
     if (enabled) trigger = validateAutomationTrigger(trigger, now);
+    if (enabled && this.store.hasUnknownRun(id)) throw new AutomationServiceError("Automation blocked by unconfirmed work; inspect Sessions before creating a replacement", 409);
     if (enabled && current.testedRevision !== current.revision) throw new AutomationServiceError("Run this automation successfully before enabling it", 409);
     const revision = definitionChanged ? current.revision + 1 : current.revision;
     let model = current.model;
@@ -243,6 +237,7 @@ export class AutomationService {
   }
 
   runNow(id: string, scope: AutomationScope, expectedRevision: number): AutomationRun {
+    if (this.stopping) throw new AutomationServiceError("Automations service is stopping", 409);
     const definition = this.requireDefinition(id, scope);
     if (definition.revision !== expectedRevision) throw new AutomationServiceError("Automation was changed by another client", 409);
     let run: AutomationRun;
@@ -317,6 +312,7 @@ export class AutomationService {
             this.observe(this.runner.release(context.session), { runId: context.runId }, "automation session release failed");
           }
           this.active.delete(run.id);
+          if (this.disposeRequested) this.dispose();
           if (!this.stopping && !launchFailed) this.tickSafely();
         });
     }
@@ -342,7 +338,7 @@ export class AutomationService {
       context.session = session;
       if (this.isStoreClosed() || this.active.get(context.runId) !== context) {
         try {
-          await this.runner.forceStop(session);
+          await this.runner.release(session);
         } catch (error) {
           this.logger.warn({ runId: context.runId, err: error }, "automation late session cleanup failed");
         }
@@ -351,7 +347,7 @@ export class AutomationService {
       run = this.store.getRun(run.id) ?? run;
       if (isTerminalRunStatus(run.status)) {
         try {
-          await this.runner.forceStop(session);
+          await this.runner.release(session);
         } catch (error) {
           this.logger.warn({ runId: context.runId, err: error }, "automation terminal session cleanup failed");
         }
@@ -396,7 +392,9 @@ export class AutomationService {
       const usage = context.session === undefined || latest.sessionId === undefined
         ? undefined
         : await this.runner.snapshot(context.session, this.nowIso());
-      if (latest.status === "cancelling" || context.cancellationKind !== undefined) {
+      if (error instanceof AutomationExecutionUnknownError || (latest.status === "running" || latest.status === "cancelling") && !(error instanceof AutomationPromptError)) {
+        this.markUnknown(context, errorMessage(error));
+      } else if (latest.status === "cancelling" || context.cancellationKind !== undefined) {
         this.finishCancellation(context.runId, latest.cancellationKind ?? context.cancellationKind ?? "user", usage);
       } else {
         this.store.finishRun(context.runId, {
@@ -421,8 +419,9 @@ export class AutomationService {
 
   private acceptCreatedSession(context: ActiveAutomationRun, session: CreatedAutomationSession): void {
     context.session = session;
-    if (this.active.get(context.runId) !== context) {
-      this.observe(this.runner.forceStop(session), { runId: context.runId }, "automation late session cleanup failed");
+    if (!this.storeClosed) this.store.recordSession(context.runId, session.sessionId);
+    if (this.stopping || this.active.get(context.runId) !== context) {
+      this.observe(this.runner.release(session), { runId: context.runId }, "automation late connection cleanup failed");
       return;
     }
     if (context.abortStarted) this.observe(this.beginAbort(context), { runId: context.runId }, "automation abort failed");
@@ -433,34 +432,21 @@ export class AutomationService {
       context.abortStarted = true;
       const run = this.store.getRun(context.runId);
       const graceMs = run === undefined ? DEFAULT_AUTOMATION_ABORT_GRACE_MS : this.store.getDefinition(run.automationId)?.abortGraceMs ?? DEFAULT_AUTOMATION_ABORT_GRACE_MS;
-      context.forceStopTimer = setTimeout(() => {
-        void this.forceStop(context).catch((error: unknown) => {
-          this.logger.error({ runId: context.runId, err: error }, "automation force stop failed");
-        });
+      context.cancellationTimer = setTimeout(() => {
+        this.markUnknown(context, "Cancellation was not confirmed before the grace deadline; work may continue. Inspect Sessions.");
+        if (context.session) this.observe(this.runner.release(context.session), { runId: context.runId }, "automation connection close failed");
       }, graceMs);
-      context.forceStopTimer.unref();
+      context.cancellationTimer.unref();
     }
     if (context.session === undefined) return;
-    context.abortPromise ??= this.runner.abort(context.session).catch((error: unknown) => {
-      this.logger.warn({ runId: context.runId, err: error }, "automation soft abort failed");
-    });
+    context.abortPromise ??= this.runner.abort(context.session);
     await context.abortPromise;
   }
 
-  private async forceStop(context: ActiveAutomationRun): Promise<void> {
-    const run = this.store.getRun(context.runId);
-    if (run === undefined || isTerminalRunStatus(run.status) || context.session === undefined) return;
-    await this.runner.forceStop(context.session);
-    this.store.finishRun(context.runId, {
-      status: "unknown",
-      completedAt: this.nowIso(),
-      reason: "force_stop_unconfirmed",
-      error: "The run did not acknowledge cancellation before the force-stop deadline",
-      forceStopped: true,
-    });
+  private markUnknown(context: ActiveAutomationRun, error: string): void {
+    if (this.storeClosed) return;
+    this.store.finishRun(context.runId, { status: "unknown", completedAt: this.nowIso(), reason: "execution_unconfirmed", error });
     clearContextTimers(context);
-    if (this.active.get(context.runId) === context) this.active.delete(context.runId);
-    if (!this.stopping) this.tickSafely();
   }
 
   private observe(promise: Promise<unknown>, details: Record<string, unknown>, message: string): void {
@@ -483,28 +469,12 @@ export class AutomationService {
     return this.storeClosed;
   }
 
-  private waitForActiveDrain(timeoutMs: number): Promise<void> {
-    if (this.active.size === 0) return Promise.resolve();
-    const deadline = Date.now() + timeoutMs;
-    return new Promise((resolve) => {
-      const check = (): void => {
-        if (this.active.size === 0 || Date.now() >= deadline) {
-          resolve();
-          return;
-        }
-        setTimeout(check, 25);
-      };
-      check();
-    });
-  }
-
   private validateModelPolicy(model: AutomationDraft["model"], models: readonly AutomationModel[]): AutomationDraft["model"] {
     if (model.mode === "default") return model;
     const provider = requireText(model.provider, "model provider", 120);
     const id = requireText(model.id, "model id", 240);
     const available = models.find((candidate) => candidate.provider === provider && candidate.id === id);
-    if (available === undefined) throw new AutomationServiceError(`Configured model is unavailable: ${provider}/${id}`, 409);
-    return { mode: "fixed", provider, id, name: available.name };
+    return { mode: "fixed", provider, id, ...(available === undefined ? {} : { name: available.name }) };
   }
 
   private requireDefinition(id: string, scope: AutomationScope): AutomationDefinition {
@@ -530,7 +500,7 @@ function validateThinkingPolicy(
   if (!aggregate.has(level)) throw new AutomationServiceError(`Invalid thinking level: ${level}`);
   if (model.mode === "fixed") {
     const selected = models.find((candidate) => candidate.provider === model.provider && candidate.id === model.id);
-    if (selected?.thinkingLevels.includes(level) !== true) {
+    if (selected !== undefined && !selected.thinkingLevels.includes(level)) {
       throw new AutomationServiceError(`Thinking level ${level} is unavailable for ${model.provider}/${model.id}`, 409);
     }
   }
@@ -570,5 +540,5 @@ function errorMessage(error: unknown): string {
 
 function clearContextTimers(context: ActiveAutomationRun): void {
   if (context.timeout !== undefined) clearTimeout(context.timeout);
-  if (context.forceStopTimer !== undefined) clearTimeout(context.forceStopTimer);
+  if (context.cancellationTimer !== undefined) clearTimeout(context.cancellationTimer);
 }

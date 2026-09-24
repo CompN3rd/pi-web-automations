@@ -1,118 +1,110 @@
-import type {
-  BackgroundSessionLease,
-  BackgroundSessionModel,
-  BackgroundSessionPromptResult,
-  BackgroundSessionService,
-  BackgroundSessionSnapshot,
-  BackgroundSessionUsage,
-} from "@jmfederico/pi-web/server-plugin-api";
-import type {
-  AutomationModel,
-  AutomationModelPolicy,
-  AutomationThinkingPolicy,
-  AutomationUsageSnapshot,
-} from "./contracts.js";
+import { randomUUID } from "node:crypto";
+import type { PiWebHostPiSessionConnection, PiWebHostPiSessionsV1, PiWebHostPiSessionEventsV1, PiWebHostWorkspacesV1 } from "@jmfederico/pi-web/server-plugin-api";
+import { AUTOMATION_REQUEST, AUTOMATION_REPLY, isRecord, type AutomationPreparation } from "../companion-protocol.js";
+import { parseUsage, parseModel, type AutomationModel, type AutomationUsageSnapshot } from "../browser/contracts.js";
 
 export interface CreatedAutomationSession {
   sessionId: string;
-  lease: BackgroundSessionLease;
+  requestId: string;
+  connection?: PiWebHostPiSessionConnection;
   actualModel?: AutomationModel;
   actualThinkingLevel?: string;
+  cancelled?: boolean;
+  running?: boolean;
+  completion?: Promise<AutomationUsageSnapshot>;
+  usage?: AutomationUsageSnapshot;
 }
+export class AutomationExecutionUnknownError extends Error {}
+/** A companion-confirmed terminal failure, unlike a lost delivery/connection. */
+export class AutomationPromptError extends Error {}
 
 export class AutomationSessionRunner {
-  constructor(private readonly sessions: BackgroundSessionService) {}
+  constructor(
+    private readonly sessions: PiWebHostPiSessionsV1,
+    private readonly events: PiWebHostPiSessionEventsV1,
+    private readonly workspaces: PiWebHostWorkspacesV1,
+    private readonly lifetime: AbortSignal,
+  ) {}
 
-  models(): AutomationModel[] {
-    return this.sessions.listModels().map(modelFromHost);
-  }
+  models(): AutomationModel[] { return []; } // No pre-session catalog capability exists.
 
-  async create(input: {
-    projectId: string;
-    workspaceId: string;
-    model: AutomationModelPolicy;
-    thinking: AutomationThinkingPolicy;
-  }, onCreated: (session: CreatedAutomationSession) => void): Promise<CreatedAutomationSession> {
-    if (input.model.mode === "fixed") this.requireAvailableModel(input.model.provider, input.model.id);
-    const lease = await this.sessions.create({
-      projectId: input.projectId,
-      workspaceId: input.workspaceId,
-      ...(input.model.mode === "fixed" ? { model: { provider: input.model.provider, id: input.model.id } } : {}),
-      ...(input.thinking.mode === "fixed" ? { thinkingLevel: input.thinking.level } : {}),
-    });
-    const created: CreatedAutomationSession = { sessionId: lease.sessionId, lease };
-    onCreated(created);
-    return createdFromSnapshot(lease, await lease.snapshot());
+  async create(input: AutomationPreparation & { projectId: string; workspaceId: string }, onCreated: (session: CreatedAutomationSession) => void): Promise<CreatedAutomationSession> {
+    this.lifetime.throwIfAborted();
+    const selection = { projectId: input.projectId, workspaceId: input.workspaceId };
+    await this.workspaces.resolve(selection);
+    this.lifetime.throwIfAborted();
+    const { sessionId } = await this.sessions.create(selection);
+    const session: CreatedAutomationSession = { sessionId, requestId: randomUUID() };
+    onCreated(session); // Persist identity even if connection/handshake subsequently fails.
+    this.lifetime.throwIfAborted();
+    session.connection = await this.events.connect({ ...selection, sessionId });
+    const reply = await this.exchange(session, "prepare", { model: input.model, thinking: input.thinking }, 5_000);
+    if (reply["status"] !== "ready") throw new AutomationPromptError(errorText(reply));
+    session.actualModel = parseModel(reply["model"]);
+    if (typeof reply["thinkingLevel"] !== "string") throw new Error("Invalid companion thinking level");
+    session.actualThinkingLevel = reply["thinkingLevel"];
+    return session;
   }
 
   async run(session: CreatedAutomationSession, prompt: string, capturedAt: () => string): Promise<AutomationUsageSnapshot> {
-    const result = await session.lease.prompt(prompt);
-    if (result.status === "failed") throw new AutomationPromptError(result.error ?? "Automation prompt failed", result);
-    if (result.status === "aborted") throw new AutomationPromptError("Automation prompt was aborted", result);
-    return usageFromHost(result.usage, capturedAt());
+    if (session.cancelled === true) throw new AutomationPromptError("Automation cancelled before prompt");
+    session.running = true;
+    session.completion = this.exchange(session, "run", { prompt }).then((reply) => {
+      if (reply["usage"] !== undefined) session.usage = { ...parseUsage(reply["usage"]), capturedAt: capturedAt() };
+      if (reply["status"] !== "completed") throw new AutomationPromptError(errorText(reply));
+      if (!session.usage) throw new AutomationExecutionUnknownError("Companion completion omitted usage");
+      return session.usage;
+    }).finally(() => { session.running = false; });
+    return session.completion;
   }
 
-  async snapshot(session: CreatedAutomationSession, capturedAt: string): Promise<AutomationUsageSnapshot | undefined> {
-    try {
-      return usageFromHost((await session.lease.snapshot()).usage, capturedAt);
-    } catch {
-      return undefined;
-    }
+  snapshot(session: CreatedAutomationSession, capturedAt: string): Promise<AutomationUsageSnapshot | undefined> {
+    return Promise.resolve(session.usage ? { ...session.usage, capturedAt } : undefined);
   }
 
-  abort(session: CreatedAutomationSession): Promise<void> {
-    return session.lease.abort();
-  }
-
-  forceStop(session: CreatedAutomationSession): Promise<void> {
-    return session.lease.forceStop();
+  async abort(session: CreatedAutomationSession): Promise<void> {
+    session.cancelled = true;
+    if (session.running !== true) return; // No prompt was sent, or our task already settled. Never abort later user work.
+    if (!session.connection || session.connection.signal.aborted || this.lifetime.aborted) throw new AutomationExecutionUnknownError("Cancellation connection lost");
+    session.connection.emit(AUTOMATION_REQUEST, { requestId: session.requestId, operation: "cancel" });
+    try { await session.completion; }
+    catch (error) { if (!(error instanceof AutomationPromptError)) throw error; }
   }
 
   release(session: CreatedAutomationSession): Promise<void> {
-    return session.lease.release();
+    session.connection?.close(); // Closing detaches only; it does not stop a user-owned conversation.
+    return Promise.resolve();
   }
 
-  private requireAvailableModel(provider: string, modelId: string): void {
-    if (!this.models().some((model) => model.provider === provider && model.id === modelId)) {
-      throw new Error(`Configured model is unavailable: ${provider}/${modelId}`);
+  private async exchange(session: CreatedAutomationSession, operation: "prepare" | "run", input: object, timeoutMs?: number): Promise<Record<string, unknown>> {
+    const connection = session.connection;
+    if (!connection) throw new Error("Automation companion connection missing");
+    const signal = AbortSignal.any([this.lifetime, connection.signal]);
+    let unsubscribe: (() => void) | undefined;
+    let onAbort: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const fail = (message: string) => { reject(operation === "run" ? new AutomationExecutionUnknownError(message) : new Error(message)); };
+        onAbort = () => { fail("Automation connection interrupted; inspect the conversation. Work may continue."); };
+        if (signal.aborted) { onAbort(); return; }
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (timeoutMs !== undefined) timer = setTimeout(() => { fail("No Automations companion handshake within 5 seconds. Enable/trust this package's Pi extension and inspect Sessions."); }, timeoutMs);
+        unsubscribe = connection.on(AUTOMATION_REPLY, (data) => {
+          if (!isRecord(data) || data["requestId"] !== session.requestId || data["operation"] !== operation) return;
+          if (data["status"] === "unknown") { reject(new AutomationExecutionUnknownError(errorText(data))); return; }
+          if (["ready", "completed", "cancelled", "failed"].includes(String(data["status"]))) resolve(data);
+        });
+        try { connection.emit(AUTOMATION_REQUEST, { requestId: session.requestId, operation, ...input }); }
+        catch (error) { fail(`Automation delivery uncertain: ${String(error)}`); }
+      });
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+      unsubscribe?.();
     }
   }
 }
-
-export class AutomationPromptError extends Error {
-  constructor(message: string, readonly result: BackgroundSessionPromptResult) {
-    super(message);
-  }
-}
-
-function modelFromHost(model: BackgroundSessionModel): AutomationModel {
-  return { provider: model.provider, id: model.id, name: model.name, thinkingLevels: [...model.thinkingLevels] };
-}
-
-function createdFromSnapshot(lease: BackgroundSessionLease, snapshot: BackgroundSessionSnapshot): CreatedAutomationSession {
-  return {
-    sessionId: lease.sessionId,
-    lease,
-    ...(snapshot.model === undefined ? {} : { actualModel: { ...snapshot.model, thinkingLevels: [] } }),
-    actualThinkingLevel: snapshot.thinkingLevel,
-  };
-}
-
-function usageFromHost(usage: BackgroundSessionUsage, capturedAt: string): AutomationUsageSnapshot {
-  const estimatedCostMicros = usage.estimatedCostUsd === undefined
-    ? undefined
-    : Math.round(usage.estimatedCostUsd * 1_000_000);
-  return {
-    scope: "root_session",
-    quality: "estimated",
-    tokens: {
-      input: usage.input,
-      output: usage.output,
-      cacheRead: usage.cacheRead,
-      cacheWrite: usage.cacheWrite,
-      total: usage.total,
-    },
-    ...(estimatedCostMicros === undefined ? {} : { estimatedCostMicros }),
-    capturedAt,
-  };
+function errorText(reply: Record<string, unknown>): string {
+  return typeof reply["error"] === "string" ? reply["error"].slice(0, 2000) : `Automation ${String(reply["status"])}`;
 }

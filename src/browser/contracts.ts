@@ -33,7 +33,7 @@ export interface AutomationModel {
   thinkingLevels: readonly string[];
 }
 export interface AutomationUsageSnapshot {
-  scope: "root_session";
+  scope: "root_session" | "assistant_messages";
   quality: AutomationUsageQuality;
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
   estimatedCostMicros?: number;
@@ -250,18 +250,18 @@ function optionalAttemptFields(record: Record<string, unknown>): Partial<Automat
   return result;
 }
 
-function parseUsage(value: unknown): AutomationUsageSnapshot {
+export function parseUsage(value: unknown): AutomationUsageSnapshot {
   const record = expectRecord(value, "usage"); const tokens = expectRecord(record["tokens"], "usage.tokens");
   const estimatedCostMicros = optionalNumber(record["estimatedCostMicros"], "usage.estimatedCostMicros");
   return {
-    scope: expectEnum(record["scope"], ["root_session"], "usage.scope"), quality: expectEnum(record["quality"], ["estimated", "partial", "provider_reported", "unknown"], "usage.quality"),
+    scope: expectEnum(record["scope"], ["root_session", "assistant_messages"], "usage.scope"), quality: expectEnum(record["quality"], ["estimated", "partial", "provider_reported", "unknown"], "usage.quality"),
     tokens: { input: expectNumber(tokens["input"], "tokens.input"), output: expectNumber(tokens["output"], "tokens.output"), cacheRead: expectNumber(tokens["cacheRead"], "tokens.cacheRead"), cacheWrite: expectNumber(tokens["cacheWrite"], "tokens.cacheWrite"), total: expectNumber(tokens["total"], "tokens.total") },
     ...(estimatedCostMicros === undefined ? {} : { estimatedCostMicros }),
     capturedAt: expectString(record["capturedAt"], "usage.capturedAt"),
   };
 }
 
-function parseModel(value: unknown): AutomationModel {
+export function parseModel(value: unknown): AutomationModel {
   const record = expectRecord(value, "model");
   return { provider: expectString(record["provider"], "model.provider"), id: expectString(record["id"], "model.id"), name: expectString(record["name"], "model.name"), thinkingLevels: expectArray(record["thinkingLevels"], "model.thinkingLevels").map((level) => expectString(level, "thinking level")) };
 }

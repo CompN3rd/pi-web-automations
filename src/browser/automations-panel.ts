@@ -16,7 +16,6 @@ import type {
   AutomationDefinition,
   AutomationModelPolicy,
   AutomationRun,
-  AutomationSnapshot,
   AutomationThinkingPolicy,
   AutomationTrigger,
   AutomationUsageSnapshot,
@@ -37,7 +36,7 @@ function createPanel(html: HtmlTemplateTag, svg: SvgTemplateTag, controller: Aut
     title: "Automations",
     order: 25,
     icon: svg`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4M16 2v4M3 10h18"/><rect x="3" y="4" width="18" height="17" rx="2"/><path d="m9 15 2 2 4-4"/></svg>`,
-    visible: (context) => context.backend !== undefined,
+    visible: (context) => context.peer?.request !== undefined,
     badge: (context) => {
       const snapshot = controller.state(context).snapshot;
       const active = snapshot?.runs.filter((run) => activeRun(run)).length ?? 0;
@@ -75,6 +74,8 @@ function renderEditor(html: HtmlTemplateTag, controller: AutomationsController, 
   if (editor === undefined) return null;
   const snapshot = state.snapshot;
   const thinkingLevels = availableThinkingLevels(snapshot, editor.model);
+  // The select value binding precedes iterable option insertion on first mount;
+  // selected attributes also establish the saved policy's initial selection.
   return html`
     <form class="automation-editor" @submit=${(event: SubmitEvent) => { event.preventDefault(); void controller.saveEditor(context); }}>
       <header><h3>${editor.automationId === undefined ? "Create automation" : "Edit automation"}</h3><span>Saved definition changes require another successful test run.</span></header>
@@ -83,11 +84,11 @@ function renderEditor(html: HtmlTemplateTag, controller: AutomationsController, 
         <label>Description<input maxlength="500" .value=${editor.description} @input=${(event: Event) => { controller.updateEditor(context, { description: inputValue(event) }); }}></label>
         <label class="wide">Prompt<textarea required rows="6" .value=${editor.prompt} @input=${(event: Event) => { controller.updateEditor(context, { prompt: inputValue(event) }); }}></textarea></label>
         ${renderTriggerEditor(html, controller, context, editor)}
-        ${renderModelEditor(html, controller, context, editor, snapshot)}
+        ${renderModelEditor(html, controller, context, editor)}
         <label>Thinking
           <select .value=${thinkingValue(editor.thinking)} @change=${(event: Event) => { controller.updateEditor(context, { thinking: parseThinking(inputValue(event)) }); }}>
-            <option value="default">Machine default</option>
-            ${thinkingLevels.map((level) => html`<option value=${`fixed:${level}`}>${level}</option>`)}
+            <option value="default" ?selected=${editor.thinking.mode === "default"}>Machine default</option>
+            ${thinkingLevels.map((level) => html`<option value=${`fixed:${level}`} ?selected=${editor.thinking.mode === "fixed" && editor.thinking.level === level}>${level}</option>`)}
           </select>
         </label>
         <label>Timeout (minutes)<input required type="number" min=${minutes(snapshot?.minTimeoutMs ?? 1)} max=${minutes(snapshot?.maxTimeoutMs ?? 86_400_000)} step="1" .value=${String(minutes(editor.timeoutMs))} @input=${(event: Event) => { controller.updateEditor(context, { timeoutMs: Math.round(Number(inputValue(event)) * 60_000) }); }}></label>
@@ -114,14 +115,19 @@ function renderTriggerEditor(html: HtmlTemplateTag, controller: AutomationsContr
   `;
 }
 
-function renderModelEditor(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext, editor: AutomationEditor, snapshot: AutomationSnapshot | undefined) {
+function renderModelEditor(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext, editor: AutomationEditor) {
+  const policy = editor.model;
   return html`
-    <label>Model
-      <select .value=${modelValue(editor.model)} @change=${(event: Event) => { controller.updateEditor(context, { model: parseModel(inputValue(event), snapshot) }); }}>
-        <option value="default">Machine default</option>
-        ${(snapshot?.models ?? []).map((model) => html`<option value=${`fixed:${model.provider}:${model.id}`}>${model.name} (${model.provider})</option>`)}
+    <label>Model policy
+      <select .value=${policy.mode} @change=${(event: Event) => { controller.updateEditor(context, { model: inputValue(event) === "fixed" ? { mode: "fixed", provider: "", id: "" } : { mode: "default" } }); }}>
+        <option value="default">Machine default</option><option value="fixed">Fixed provider/model</option>
       </select>
     </label>
+    ${policy.mode === "fixed" ? html`
+      <label>Provider<input required .value=${policy.provider} @input=${(event: Event) => { controller.updateEditor(context, { model: { ...policy, provider: inputValue(event) } }); }}></label>
+      <label>Model id<input required .value=${policy.id} @input=${(event: Event) => { controller.updateEditor(context, { model: { ...policy, id: inputValue(event) } }); }}></label>
+    ` : null}
+    <p>No pre-session model catalog is available. Fixed policies are validated by the companion at test/run; they never fall back.</p>
   `;
 }
 
@@ -171,14 +177,12 @@ function activeRun(run: AutomationRun): boolean { return ["queued", "starting", 
 function minutes(ms: number): number { return Math.max(1, Math.round(ms / 60_000)); }
 function formatDate(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString(); }
 function formatDuration(run: AutomationRun): string { if (run.startedAt === undefined) return "not started"; const end = run.completedAt === undefined ? Date.now() : new Date(run.completedAt).getTime(); const seconds = Math.max(0, Math.round((end - new Date(run.startedAt).getTime()) / 1000)); return seconds < 60 ? `${String(seconds)}s` : `${String(Math.floor(seconds / 60))}m ${String(seconds % 60)}s`; }
-function formatUsage(usage: AutomationUsageSnapshot | undefined): string { if (usage === undefined) return "—"; const cost = usage.estimatedCostMicros === undefined ? "" : ` · $${(usage.estimatedCostMicros / 1_000_000).toFixed(4)}`; return `${usage.tokens.total.toLocaleString()} tokens${cost} (${usage.quality})`; }
+function formatUsage(usage: AutomationUsageSnapshot | undefined): string { if (usage === undefined) return "—"; const cost = usage.estimatedCostMicros === undefined ? "" : ` · $${(usage.estimatedCostMicros / 1_000_000).toFixed(4)}`; return `${usage.tokens.total.toLocaleString()} tokens${cost} (${usage.quality}${usage.scope === "assistant_messages" ? ", assistant messages; estimated cost" : ""})`; }
 function formatTrigger(trigger: AutomationTrigger): string { if (trigger.type === "manual") return "Manual only"; if (trigger.type === "once") return `Once at ${formatDate(trigger.at)}`; if (trigger.type === "interval") return `Every ${String(minutes(trigger.intervalMs))} minutes`; return `${trigger.expression} (${trigger.timeZone})`; }
 function formatModel(model: AutomationModelPolicy): string { return model.mode === "default" ? "Machine default" : (model.name ?? `${model.provider}/${model.id}`); }
 function formatThinking(thinking: AutomationThinkingPolicy): string { return thinking.mode === "default" ? "Model default" : thinking.level; }
-function modelValue(model: AutomationModelPolicy): string { return model.mode === "default" ? "default" : `fixed:${model.provider}:${model.id}`; }
 function thinkingValue(thinking: AutomationThinkingPolicy): string { return thinking.mode === "default" ? "default" : `fixed:${thinking.level}`; }
 function parseThinking(value: string): AutomationThinkingPolicy { return value === "default" ? { mode: "default" } : { mode: "fixed", level: value.slice("fixed:".length) }; }
-function parseModel(value: string, snapshot: AutomationSnapshot | undefined): AutomationModelPolicy { if (value === "default") return { mode: "default" }; const encoded = value.slice("fixed:".length); const model = snapshot?.models.find((candidate) => `${candidate.provider}:${candidate.id}` === encoded); return model === undefined ? { mode: "default" } : { mode: "fixed", provider: model.provider, id: model.id, name: model.name }; }
 function defaultTrigger(type: string): AutomationTrigger { if (type === "once") return { type, at: new Date(Date.now() + 3_600_000).toISOString() }; if (type === "interval") return { type, intervalMs: 3_600_000 }; if (type === "cron") return { type, expression: "0 0 9 * * *", timeZone: localTimeZone() }; return { type: "manual" }; }
 function updatedOnceTrigger(value: string, current: Extract<AutomationTrigger, { type: "once" }>): AutomationTrigger { const date = new Date(value); return Number.isNaN(date.getTime()) ? current : { type: "once", at: date.toISOString() }; }
 function localTimeZone(): string { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }

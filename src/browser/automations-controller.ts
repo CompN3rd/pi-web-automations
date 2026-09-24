@@ -165,9 +165,6 @@ export class AutomationsController {
     const state = this.stateFor(context);
     if (state.editor === undefined) return;
     state.editor = { ...state.editor, ...patch };
-    if (patch.model !== undefined && state.editor.thinking.mode === "fixed" && !availableThinkingLevels(state.snapshot, state.editor.model).includes(state.editor.thinking.level)) {
-      state.editor.thinking = { mode: "default" };
-    }
     this.render(state);
   }
 
@@ -236,8 +233,8 @@ export class AutomationsController {
   }
 
   private async request<T>(context: WorkspacePanelContext, operation: string, input: JsonValue, parser: (value: unknown) => T): Promise<T> {
-    if (context.backend === undefined) throw new Error("Automations backend is unavailable on this machine");
-    const envelope = parseAutomationEnvelope(await context.backend.request(operation, input));
+    if (context.peer?.request === undefined) throw new Error("Automations backend is unavailable on this machine");
+    const envelope = parseAutomationEnvelope(await context.peer.request(operation, input));
     if (!envelope.ok) throw new AutomationDomainError(envelope.error.code, envelope.error.message);
     return parser(envelope.value);
   }
@@ -310,7 +307,7 @@ export function hasActiveRuns(snapshot: AutomationSnapshot | undefined): boolean
 
 export function availableThinkingLevels(snapshot: AutomationSnapshot | undefined, policy: AutomationModelPolicy): readonly string[] {
   if (snapshot === undefined || policy.mode === "default") return snapshot?.thinkingLevels ?? [];
-  return snapshot.models.find((model) => model.provider === policy.provider && model.id === policy.id)?.thinkingLevels ?? [];
+  return snapshot.models.find((model) => model.provider === policy.provider && model.id === policy.id)?.thinkingLevels ?? snapshot.thinkingLevels;
 }
 
 function editorDraft(editor: AutomationEditor): AutomationDraft {

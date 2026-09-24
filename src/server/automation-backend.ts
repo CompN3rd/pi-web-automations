@@ -1,4 +1,4 @@
-import type { JsonValue, WorkspaceBackendRequestContext } from "@jmfederico/pi-web/server-plugin-api";
+import type { JsonValue, ServerPluginPeerRequestContext } from "@jmfederico/pi-web/server-plugin-api";
 import {
   AUTOMATIONS_CONTRACT_VERSION,
   AUTOMATIONS_OPERATIONS,
@@ -11,7 +11,7 @@ import type { AutomationScope, UpdateAutomationRequest } from "./contracts.js";
 export class AutomationBackend {
   constructor(private readonly service: () => AutomationService | undefined) {}
 
-  request(context: WorkspaceBackendRequestContext): Promise<JsonValue> {
+  request(context: ServerPluginPeerRequestContext): Promise<JsonValue> {
     const service = this.service();
     if (service === undefined) throw new Error("Automations service is not ready");
     try {
@@ -28,7 +28,7 @@ export class AutomationBackend {
   }
 }
 
-function dispatch(service: AutomationService, context: WorkspaceBackendRequestContext): unknown {
+function dispatch(service: AutomationService, context: ServerPluginPeerRequestContext): unknown {
   const scope = scopeFromContext(context);
   switch (context.operation) {
     case AUTOMATIONS_OPERATIONS.snapshot: {
@@ -86,7 +86,7 @@ function dispatch(service: AutomationService, context: WorkspaceBackendRequestCo
   }
 }
 
-function scopeFromContext(context: WorkspaceBackendRequestContext): AutomationScope {
+function scopeFromContext(context: ServerPluginPeerRequestContext): AutomationScope {
   return {
     projectId: context.project.id,
     workspaceId: context.workspace.id,

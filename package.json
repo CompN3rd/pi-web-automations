@@ -7,6 +7,7 @@
   "type": "module",
   "files": [
     "dist",
+    "docs",
     "README.md",
     "LICENSE"
   ],
@@ -27,8 +28,9 @@
     "croner": "^10.0.1"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.1",
     "@eslint/js": "^10.0.1",
-    "@jmfederico/pi-web": "git+https://github.com/CompN3rd/pi-web.git#e9cd5148ea4e71f4094ec6a7e5b953500d40b2a7",
+    "@jmfederico/pi-web": "^1.202609.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.13.3",
     "eslint": "^10.6.0",
@@ -70,6 +72,11 @@
         "serverModule": "dist/server-plugin.js",
         "machineSpecific": true
       }
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "dist/companion.js"
     ]
   }
 }

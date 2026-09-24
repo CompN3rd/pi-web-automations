@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { WorkspaceBackendRequestContext } from "@jmfederico/pi-web/server-plugin-api";
+import type { ServerPluginPeerRequestContext } from "@jmfederico/pi-web/server-plugin-api";
 import { AUTOMATIONS_OPERATIONS } from "./browser/contracts.js";
 import { AutomationBackend } from "./server/automation-backend.js";
 import { AutomationService } from "./server/automation-service.js";
@@ -21,7 +21,7 @@ class PendingRunner {
   release(): Promise<void> { return Promise.resolve(); }
 }
 
-function context(operation: string, input: WorkspaceBackendRequestContext["input"]): WorkspaceBackendRequestContext {
+function context(operation: string, input: ServerPluginPeerRequestContext["input"]): ServerPluginPeerRequestContext {
   return {
     project: { id: "project-1", name: "Project", path: "/registered" },
     workspace: { id: "workspace-1", projectId: "project-1", path: "/authoritative", label: "main", isMain: true },
@@ -73,6 +73,29 @@ describe("AutomationBackend", () => {
 
     expect(() => backend.request(context(AUTOMATIONS_OPERATIONS.create, { contractVersion: 1, draft: draft() }))).toThrow("disk I/O failed");
     store.close();
+  });
+
+  it("deletes an unknown-only definition through the scoped API without deleting its history", async () => {
+    const store = new AutomationStore(":memory:");
+    try {
+      const service = new AutomationService(store, new PendingRunner());
+      const backend = new AutomationBackend(() => service);
+      const automation = service.create({ projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/authoritative" }, draft());
+      const request = context(AUTOMATIONS_OPERATIONS.delete, { contractVersion: 1, automationId: automation.id, expectedRevision: automation.revision });
+      store.createManualRun(automation, "old-run", "2026-01-01T00:00:00.000Z");
+      store.markRunStarting("old-run", "old-attempt", "2026-01-01T00:00:01.000Z");
+      await expect(backend.request(request)).resolves.toMatchObject({ ok: false, error: { code: "conflict", message: "Cannot delete an automation while it has an active run" } });
+      const history = store.finishRun("old-run", { status: "unknown", reason: "daemon_restart", completedAt: "2026-01-01T00:00:02.000Z" });
+
+      await expect(backend.request({ ...request, workspace: { ...request.workspace, id: "other-workspace" } })).resolves.toMatchObject({ ok: false, error: { code: "not-found" } });
+      await expect(backend.request(context(AUTOMATIONS_OPERATIONS.delete, { contractVersion: 1, automationId: automation.id, expectedRevision: 99 }))).resolves.toMatchObject({ ok: false, error: { code: "conflict", message: "Automation was changed by another client" } });
+      expect(store.getDefinition(automation.id)).toBeDefined();
+      await expect(backend.request(request)).resolves.toEqual({ contractVersion: 1, ok: true, value: { deleted: true } });
+      await expect(backend.request(context(AUTOMATIONS_OPERATIONS.snapshot, { contractVersion: 1 }))).resolves.toMatchObject({ ok: true, value: { definitions: [], runs: [history] } });
+      await expect(backend.request(context(AUTOMATIONS_OPERATIONS.runNow, { contractVersion: 1, automationId: automation.id, expectedRevision: automation.revision }))).resolves.toMatchObject({ ok: false, error: { code: "not-found" } });
+    } finally {
+      store.close();
+    }
   });
 
   it("returns stale revision conflicts in-envelope", async () => {

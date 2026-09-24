@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BackgroundSessionLease } from "@jmfederico/pi-web/server-plugin-api";
 import type { AutomationDraft, AutomationModel, AutomationUsageSnapshot } from "./server/contracts.js";
 import { AutomationService, type AutomationServiceLogger } from "./server/automation-service.js";
-import type { CreatedAutomationSession } from "./server/automation-session-runner.js";
+import { AutomationPromptError, AutomationExecutionUnknownError, type CreatedAutomationSession } from "./server/automation-session-runner.js";
 import { AutomationStore } from "./server/automation-store.js";
 
 const scope = { projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/repo" };
@@ -24,18 +23,9 @@ class Deferred<T> {
   reject(error: unknown): void { this.rejectPromise(error); }
 }
 
-const unusedLease: BackgroundSessionLease = {
-  sessionId: "session-1",
-  prompt: () => Promise.reject(new Error("unused")),
-  snapshot: () => Promise.reject(new Error("unused")),
-  abort: () => Promise.resolve(),
-  forceStop: () => Promise.resolve(),
-  release: () => Promise.resolve(),
-};
-
 class FakeRunner {
   readonly prompt = new Deferred<AutomationUsageSnapshot>();
-  readonly created: CreatedAutomationSession = { sessionId: "session-1", lease: unusedLease, actualModel: model, actualThinkingLevel: "medium" };
+  readonly created: CreatedAutomationSession = { sessionId: "session-1", requestId: "request-1", actualModel: model, actualThinkingLevel: "medium" };
   readonly createInputs: unknown[] = [];
   abortCalls = 0;
   forceStopCalls = 0;
@@ -48,7 +38,7 @@ class FakeRunner {
   }
   run(): Promise<AutomationUsageSnapshot> { return this.prompt.promise; }
   snapshot(): Promise<AutomationUsageSnapshot> { return Promise.resolve(usage); }
-  abort(): Promise<void> { this.abortCalls += 1; this.prompt.reject(new Error("aborted")); return Promise.resolve(); }
+  abort(): Promise<void> { this.abortCalls += 1; this.prompt.reject(new AutomationPromptError("aborted")); return Promise.resolve(); }
   forceStop(): Promise<void> { this.forceStopCalls += 1; return Promise.resolve(); }
   release(): Promise<void> { this.releaseCalls += 1; return Promise.resolve(); }
 }
@@ -142,7 +132,7 @@ describe("AutomationService", () => {
     expect(service.listRuns(scope)[0]).toMatchObject({ status: "cancelled", usage });
   });
 
-  it("force-stops a run without waiting for a non-settling usage snapshot", async () => {
+  it("blocks a run without waiting for a non-settling usage snapshot", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-24T12:00:00.000Z"));
     const runner = new FakeRunner();
@@ -156,11 +146,11 @@ describe("AutomationService", () => {
     await vi.advanceTimersByTimeAsync(15_000);
     await flushMicrotasks();
 
-    expect(runner.forceStopCalls).toBe(1);
-    expect(service.listRuns(scope)[0]).toMatchObject({ status: "unknown", reason: "force_stop_unconfirmed", attempt: { forceStopped: true } });
+    expect(runner.forceStopCalls).toBe(0);
+    expect(service.listRuns(scope)[0]).toMatchObject({ status: "unknown", reason: "execution_unconfirmed", attempt: { forceStopped: false } });
   });
 
-  it("keeps cancellation and overlap protection honest when force-stop rejects", async () => {
+  it("keeps cancellation and overlap protection honest without a force-stop capability", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-24T12:00:00.000Z"));
     const runner = new FakeRunner();
@@ -174,10 +164,10 @@ describe("AutomationService", () => {
     await vi.advanceTimersByTimeAsync(15_000);
     await flushMicrotasks();
 
-    expect(runner.forceStopCalls).toBe(1);
-    expect(service.listRuns(scope)[0]).toMatchObject({ status: "cancelling", cancellationKind: "user" });
-    expect(() => service.runNow(automation.id, scope, automation.revision)).toThrow("already has an active run");
-    await expect(service.stop(0)).resolves.toBeUndefined();
+    expect(runner.forceStopCalls).toBe(0);
+    expect(service.listRuns(scope)[0]).toMatchObject({ status: "unknown", cancellationKind: "user" });
+    expect(() => service.runNow(automation.id, scope, automation.revision)).toThrow("blocked by unconfirmed work");
+    await expect(service.stop()).resolves.toBeUndefined();
   });
 
   it("starts the execution timeout only after lease acquisition", async () => {
@@ -207,14 +197,13 @@ describe("AutomationService", () => {
       onCreated(runner.created);
       return Promise.reject(new Error("snapshot failed"));
     };
-    runner.snapshot = () => new Promise<AutomationUsageSnapshot>(() => undefined);
     const { service } = fixture(runner);
     const automation = service.create(scope, draft());
     service.runNow(automation.id, scope, automation.revision);
     await flushMicrotasks();
 
     expect(runner.releaseCalls).toBe(1);
-    expect(service.listRuns(scope)[0]).toMatchObject({ status: "failed", error: "snapshot failed" });
+    expect(service.listRuns(scope)[0]).toMatchObject({ status: "failed", sessionId: "session-1", error: "snapshot failed" });
   });
 
   it("marks prompt terminal failures as failed runs", async () => {
@@ -222,7 +211,7 @@ describe("AutomationService", () => {
     const automation = service.create(scope, draft());
     service.runNow(automation.id, scope, automation.revision);
     await flushMicrotasks();
-    runner.prompt.reject(new Error("provider failed"));
+    runner.prompt.reject(new AutomationPromptError("provider failed"));
     await flushMicrotasks();
     expect(service.listRuns(scope)[0]).toMatchObject({ status: "failed", error: "provider failed", reason: "execution_error" });
   });
@@ -237,7 +226,7 @@ describe("AutomationService", () => {
     expect(log.errors).toMatchObject([{ details: { err: { message: "database unavailable" } }, message: "automation scheduler tick failed" }]);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(listDue).toHaveBeenCalledTimes(2);
-    await service.stop(0);
+    await service.stop();
   });
 
   it("logs execution launch and release failures without unhandled rejections", async () => {
@@ -260,7 +249,7 @@ describe("AutomationService", () => {
     expect(log.errors[1]?.message).toBe("automation session release failed");
     expect(typeof log.errors[1]?.details["runId"]).toBe("string");
     expect(log.errors[1]?.details["err"]).toEqual(new Error("release failed"));
-    await service.stop(0);
+    await service.stop();
   });
 
   it("does not arm polling when scheduler recovery fails", () => {
@@ -274,6 +263,25 @@ describe("AutomationService", () => {
     expect(due).not.toHaveBeenCalled();
   });
 
+  it("blocks unknown execution across edits, manual starts, enable and restart", async () => {
+    vi.useFakeTimers();
+    const { service, runner, store } = fixture();
+    const automation = service.create(scope, draft());
+    service.runNow(automation.id, scope, 1);
+    await flushMicrotasks();
+    runner.prompt.reject(new AutomationExecutionUnknownError("connection lost"));
+    await flushMicrotasks();
+    expect(service.listRuns(scope)[0]).toMatchObject({ status: "unknown", sessionId: "session-1" });
+    const edited = service.update(automation.id, { ...scope, expectedRevision: 1, prompt: "Changed" });
+    expect(() => service.runNow(automation.id, scope, edited.revision)).toThrow("blocked by unconfirmed work");
+    expect(() => service.update(automation.id, { ...scope, expectedRevision: edited.revision, enabled: true })).toThrow("blocked");
+    store.recoverInterruptedRuns(new Date().toISOString());
+    expect(store.hasActiveRun(automation.id)).toBe(false);
+    expect(store.hasUnknownRun(automation.id)).toBe(true);
+    expect(() => service.runNow(automation.id, scope, edited.revision)).toThrow("blocked by unconfirmed work");
+    expect(service.list(scope)[0]).toMatchObject({ enabled: false });
+  });
+
   it("recovers ambiguous attempts when the scheduler starts", async () => {
     vi.useFakeTimers();
     const { service, store } = fixture();
@@ -282,18 +290,18 @@ describe("AutomationService", () => {
     store.markRunStarting(run.id, "attempt-1", "2026-01-01T00:00:01.000Z");
     service.start();
     expect(store.getRun(run.id)).toMatchObject({ status: "unknown", reason: "daemon_restart" });
-    await service.stop(0);
+    await service.stop();
   });
 
-  it("quiesces active leases and closes the store idempotently", async () => {
+  it("interrupts active conversations without aborting user work and closes the store idempotently", async () => {
     vi.useFakeTimers();
     const { service, runner } = fixture();
     const automation = service.create(scope, draft());
     service.runNow(automation.id, scope, automation.revision);
     await flushMicrotasks();
-    await service.stop(0);
-    expect(runner.abortCalls).toBe(1);
-    expect(runner.forceStopCalls).toBe(1);
+    await service.stop();
+    expect(runner.abortCalls).toBe(0);
+    expect(runner.forceStopCalls).toBe(0);
     service.dispose();
     service.dispose();
   });
