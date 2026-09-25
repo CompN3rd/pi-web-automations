@@ -276,6 +276,16 @@ export class AutomationStore {
     return rows.map((row) => this.runFromRow(row));
   }
 
+  costStatistics(projectId: string, workspaceId: string): { automationId: string; count: number; priced: number; totalMicros: number }[] {
+    return this.db.prepare<[string, string], { automationId: string; count: number; priced: number; totalMicros: number }>(`
+      SELECT automation_id AS automationId, COUNT(*) AS count,
+        COUNT(json_extract(usage_json, '$.estimatedCostMicros')) AS priced,
+        COALESCE(SUM(json_extract(usage_json, '$.estimatedCostMicros')), 0) AS totalMicros
+      FROM automation_runs WHERE project_id = ? AND workspace_id = ?
+      GROUP BY automation_id
+    `).all(projectId, workspaceId);
+  }
+
   getRun(id: string): AutomationRun | undefined {
     const row = this.db.prepare<[string], RunRow>("SELECT * FROM automation_runs WHERE id = ?").get(id);
     return row === undefined ? undefined : this.runFromRow(row);

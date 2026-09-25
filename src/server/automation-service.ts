@@ -119,6 +119,10 @@ export class AutomationService {
     return this.store.listRuns(scope.projectId, scope.workspaceId, options);
   }
 
+  costStatistics(scope: AutomationScope) {
+    return this.store.costStatistics(scope.projectId, scope.workspaceId);
+  }
+
   models(): AutomationModels {
     const models = this.runner.models();
     const thinkingLevels = new Set<string>(KNOWN_THINKING_LEVELS);

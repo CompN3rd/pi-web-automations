@@ -41,6 +41,25 @@ afterEach(() => {
 });
 
 describe("AutomationStore", () => {
+  it("aggregates costs across retained history independently of the run list limit and scope", () => {
+    const db = store();
+    const automation = db.insertDefinition(definition());
+    const at = "2026-07-24T12:01:00.000Z";
+    for (let i = 0; i < 202; i++) {
+      const id = `cost-${String(i)}`;
+      db.createManualRun(automation, id, at);
+      db.markRunStarting(id, `attempt-${id}`, at);
+      db.finishRun(id, { status: "completed", completedAt: at, ...(i === 0 ? {} : { usage: {
+        scope: "root_session", quality: "estimated", capturedAt: at,
+        tokens: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 }, estimatedCostMicros: i === 1 ? 0 : 100,
+      } }) });
+    }
+    expect(db.listRuns("project-1", "workspace-1")).toHaveLength(200);
+    expect(db.costStatistics("project-1", "workspace-1")).toEqual([{ automationId: automation.id, count: 202, priced: 201, totalMicros: 20000 }]);
+    expect(db.costStatistics("other", "workspace-1")).toEqual([]);
+    expect(db.costStatistics("project-1", "other")).toEqual([]);
+  });
+
   it("uses the host-selected database path without a plugin owner file", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-web-automation-store-"));
     tempRoots.push(root);

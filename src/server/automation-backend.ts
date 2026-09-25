@@ -38,6 +38,7 @@ function dispatch(service: AutomationService, context: ServerPluginPeerRequestCo
       return {
         definitions: service.list(scope),
         runs: service.listRuns(scope, { limit }),
+        costStatistics: service.costStatistics(scope),
         ...service.models(),
         generatedAt: new Date().toISOString(),
       };

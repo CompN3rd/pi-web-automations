@@ -12,6 +12,40 @@ afterEach(() => {
 });
 
 describe("standalone Automations browser plugin", () => {
+  it("renders session links, colored timeline blocks and all-history cost statistics", async () => {
+    const activation = await plugin.activate({ apiVersion: 4, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const panel = activation.contributions.workspacePanels?.[0];
+    if (!panel) throw new Error("Expected Automations panel");
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue({
+      contractVersion: 1, ok: true, value: {
+        definitions: [fixedDefinition()], models: [], thinkingLevels: ["off"],
+        defaultTimeoutMs: 600000, minTimeoutMs: 60000, maxTimeoutMs: 86400000, generatedAt: "2026-01-01T00:02:00Z",
+        costStatistics: [{ automationId: "created", count: 300, priced: 250, totalMicros: 500000000 }],
+        runs: [{ id: "run-1", automationId: "created", automationRevision: 1, automationName: "Fixed job",
+          projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/repo", source: "manual",
+          scheduledFor: "2026-01-01T00:00:00Z", queuedAt: "2026-01-01T00:00:00Z", startedAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:01:00Z",
+          status: "completed", prompt: "Review", trigger: { type: "manual" }, configuredModel: { mode: "default" }, configuredThinking: { mode: "default" }, timeoutMs: 600000, sessionId: "session & 1",
+        }],
+      },
+    });
+    const context = panelContext(backend);
+    const container = document.createElement("div"); document.body.append(container);
+    try {
+      render(panel.render(context), container); await settle(); render(panel.render(context), container);
+      const latest = container.querySelector<HTMLAnchorElement>(".definition-card a");
+      expect(latest?.textContent).toBe("Open latest session");
+      expect(new URL(latest?.href ?? "").searchParams.get("session")).toBe("session & 1");
+      expect(container.querySelector(".timeline-block")?.getAttribute("aria-label")).toContain("Fixed job · completed");
+      expect(container.querySelector(".timeline-block")?.getAttribute("style")).toContain("width:100%");
+      expect(container.querySelector(".timeline-legend")?.textContent).toContain("Fixed job");
+      expect(container.querySelector(".cost-summary")?.textContent).toContain("all retained history");
+      expect(container.querySelector(".cost-summary")?.textContent).toContain("$500.0000");
+      expect(container.querySelector(".cost-summary")?.textContent).toContain("$2.0000");
+      expect(container.querySelector(".cost-summary")?.textContent).toContain("250 of 300");
+      expect(container.querySelector("tbody a")?.textContent).toBe("Open session");
+    } finally { render(null, container); }
+  });
+
   it("saves manually entered fixed model identifiers without resetting fixed thinking", async () => {
     const activation = await plugin.activate({ apiVersion: 4, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
     const panel = activation.contributions.workspacePanels?.[0];

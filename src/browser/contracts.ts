@@ -123,6 +123,7 @@ export interface AutomationPatch {
 export interface AutomationSnapshot {
   definitions: AutomationDefinition[];
   runs: AutomationRun[];
+  costStatistics?: { automationId: string; count: number; priced: number; totalMicros: number }[];
   models: AutomationModel[];
   thinkingLevels: string[];
   defaultTimeoutMs: number;
@@ -156,6 +157,10 @@ export function parseAutomationSnapshot(value: unknown): AutomationSnapshot {
   return {
     definitions: expectArray(record["definitions"], "definitions").map(parseDefinition),
     runs: expectArray(record["runs"], "runs").map(parseRun),
+    ...(record["costStatistics"] === undefined ? {} : { costStatistics: expectArray(record["costStatistics"], "costStatistics").map((value) => {
+      const stats = expectRecord(value, "cost statistics");
+      return { automationId: expectString(stats["automationId"], "automationId"), count: expectNumber(stats["count"], "count"), priced: expectNumber(stats["priced"], "priced"), totalMicros: expectNumber(stats["totalMicros"], "totalMicros") };
+    }) }),
     models: expectArray(record["models"], "models").map(parseModel),
     thinkingLevels: expectArray(record["thinkingLevels"], "thinkingLevels").map((level) => expectString(level, "thinking level")),
     defaultTimeoutMs: expectNumber(record["defaultTimeoutMs"], "defaultTimeoutMs"),
