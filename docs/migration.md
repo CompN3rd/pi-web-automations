@@ -2,7 +2,7 @@
 
 ## Status and assessment
 
-This is an **unreleased cooperative scheduler** adopting upstream's user-owned session contract. It is not a drop-in replacement for the fork's exclusive background-session service. Requires released `@jmfederico/pi-web@1.202609.1` or newer with public browser API **v4** and server API **v3**, plus compatible Pi extension types (`@earendil-works/pi-coding-agent@^0.87.1`). Registry `1.202609.0` predates these APIs and is not compatible.
+This is a **cooperative scheduler** adopting upstream's user-owned session contract. It is not a drop-in replacement for the fork's exclusive background-session service. Requires released `@jmfederico/pi-web@1.202609.1` or newer with public browser API **v4** and server API **v3**, plus compatible Pi extension types (`@earendil-works/pi-coding-agent@^0.87.1`). Registry `1.202609.0` predates these APIs and is not compatible.
 
 Automations uses the public upstream contract for durable definitions, schedules, run history, a machine-scoped workspace UI and agent execution. User-owned sessions, cooperative cancellation and partial usage accounting are accepted operating constraints, not blockers awaiting additional host APIs. Scheduling/persistence remain plugin-owned. Agent control belongs in the bundled Pi extension, not in private PI WEB routes or subprocesses.
 
@@ -30,11 +30,11 @@ npm run verify
 npm run pack:dry
 ```
 
-CI runs the same checks against the released host package on Windows and Linux. Direct runtime dependencies remain `better-sqlite3` and `croner`. PI WEB `^1.202609.1` is a runtime peer (the server imports its public capability constants); the Pi coding agent is also a peer, supplied by Pi when loading the companion. Both are development dependencies for local typechecking. The package ships browser and server entries, the companion, and these docs. Import, real-pack and clean production-only tarball-install validators run in `npm run verify`. The install check verifies the server and companion imports against npm-resolved peers, not an end-to-end scheduler run in a hosted Pi profile. The package itself is not yet published.
+CI runs the same checks against the released host package on Windows and Linux. Direct runtime dependencies remain `better-sqlite3` and `croner`. PI WEB `^1.202609.1` is a runtime peer (the server imports its public capability constants); the Pi coding agent is also a peer, supplied by Pi when loading the companion. Both are development dependencies for local typechecking. The package ships browser and server entries, the companion, and these docs. Import, real-pack and clean production-only tarball-install validators run in `npm run verify`. The install check verifies the server and companion imports against npm-resolved peers, not an end-to-end scheduler run in a hosted Pi profile. See the [0.1.0 release notes](releases/0.1.0.md) for the initial npm release scope and operating limitations.
 
 ## Install and activate
 
-Install the built directory as a local package using the target machine's **Settings → Pi packages**. The package declares `pi.extensions: ["dist/companion.js"]` as well as paired `piWeb.plugins` entries. Ensure the Pi package/extension is enabled and trusted. Merely linking the PI WEB plugin does not install the companion into Pi sessions.
+Install `@compn3rd/pi-web-automations` from npm using the target machine's **Settings → Pi packages**; use `@compn3rd/pi-web-automations@0.1.0` to pin the initial release. For source development, install the built directory as a local package instead. The package declares `pi.extensions: ["dist/companion.js"]` as well as paired `piWeb.plugins` entries. Ensure the Pi package/extension is enabled and trusted. Merely linking the PI WEB plugin does not install the companion into Pi sessions.
 
 Enable `automations` in **Settings → PI WEB plugins**. Restart the target session daemon when safe, then reload the browser. Rebuild source edits with `npm run build`; server or companion changes require appropriate daemon/session reloads. Fresh automation sessions must see the companion. Do not modify plugin configuration or restart the daemon from a hosted session that must survive.
 
@@ -63,7 +63,7 @@ Triggers: manual, one future occurrence, interval (minimum one minute), and six-
 
 Choose the machine default or enter a fixed provider and model ID. Thinking levels are provisional known Pi values; the companion rejects unsupported values after Pi clamps them. The panel never resets an existing fixed policy silently when editing a model. Catalog absence is explicit, and no hidden catalog-discovery sessions are created.
 
-Each run creates a visible session and records its ID immediately, before connecting/preparing. Connection/model/handshake failures preserve that ID for inspection in Sessions. Session IDs are diagnostic text, not constructed private URLs. Empty failed setup conversations are not deleted by this plugin.
+Each run creates a visible session and records its ID immediately, before connecting/preparing. Connection/model/handshake failures preserve that ID for inspection in Sessions. Session IDs are retained for diagnostics; the panel links to sessions using the host's public navigation query parameters, not private routes. Empty failed setup conversations are not deleted by this plugin.
 
 ## Completion, cancellation and ambiguity
 
@@ -75,7 +75,7 @@ Completion waits for Pi `agent_settled`, including automatic retries and compact
 
 If settlement is not confirmed, the run becomes `unknown`, the definition is paused, its test marker is cleared, and **manual starts, scheduled starts and re-enabling remain blocked even after definition edits or restart**. No runtime is force-stopped and `forceStopped` remains false. Connection closure detaches observation only. Plugin lifetime shutdown stops ingress, polling and deadlines immediately, records unconfirmed active work conservatively and closes connections; it does not try to cancel over revoked dependencies. Queued work without an admitted attempt remains queued for the next start.
 
-There is intentionally no acknowledgement/unblock button in this evaluation port. Inspect the recorded conversation and its actual work in Sessions; independently stop/wait for uncertain work. Only after that inspection, create a separately named replacement definition and test it. You may delete a blocked definition once it has no queued, starting, running or cancelling runs. Delete archives the definition and retains its run/attempt history, including unknown outcomes and session IDs; it does not stop or confirm any uncertain session work. Never create a replacement just to bypass a live unknown run. A future explicit inspection/acknowledgement workflow would be a separate product change.
+There is intentionally no acknowledgement/unblock button in this release. Inspect the recorded conversation and its actual work in Sessions; independently stop/wait for uncertain work. Only after that inspection, create a separately named replacement definition and test it. You may delete a blocked definition once it has no queued, starting, running or cancelling runs. Delete archives the definition and retains its run/attempt history, including unknown outcomes and session IDs; it does not stop or confirm any uncertain session work. Never create a replacement just to bypass a live unknown run. A future explicit inspection/acknowledgement workflow would be a separate product change.
 
 A daemon/process crash can occur between host publication and SQLite recording; no public atomic transaction covers those systems. Inspect Sessions even when an interrupted record lacks an ID. During ordinary disposal the store is retained until bounded pending host calls return so late-created identities can still be recorded; this is not a durable host execution lease.
 

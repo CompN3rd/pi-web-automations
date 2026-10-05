@@ -36,13 +36,56 @@ describe("standalone Automations browser plugin", () => {
       expect(latest?.textContent).toBe("Open latest session");
       expect(new URL(latest?.href ?? "").searchParams.get("session")).toBe("session & 1");
       expect(container.querySelector(".timeline-block")?.getAttribute("aria-label")).toContain("Fixed job · completed");
-      expect(container.querySelector(".timeline-block")?.getAttribute("style")).toContain("width:100%");
-      expect(container.querySelector(".timeline-legend")?.textContent).toContain("Fixed job");
+      expect(container.querySelector(".timeline-block")?.getAttribute("style")).toContain("height:100%");
+      expect(container.querySelectorAll(".timeline-lane")).toHaveLength(1);
+      expect(container.querySelectorAll(".timeline-tick")).toHaveLength(5);
+      expect(container.querySelector(".timeline-heading strong")?.textContent).toBe("Fixed job");
+      expect(new URL(container.querySelector<HTMLAnchorElement>("a.timeline-block")?.href ?? "").searchParams.get("session")).toBe("session & 1");
       expect(container.querySelector(".cost-summary")?.textContent).toContain("all retained history");
       expect(container.querySelector(".cost-summary")?.textContent).toContain("$500.0000");
       expect(container.querySelector(".cost-summary")?.textContent).toContain("$2.0000");
       expect(container.querySelector(".cost-summary")?.textContent).toContain("250 of 300");
       expect(container.querySelector("tbody a")?.textContent).toBe("Open session");
+    } finally { render(null, container); }
+  });
+
+  it("groups days in automation columns and aligns simultaneous runs vertically", async () => {
+    const activation = await plugin.activate({ apiVersion: 4, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const panel = activation.contributions.workspacePanels?.[0];
+    if (!panel) throw new Error("Expected Automations panel");
+    const base = {
+      automationId: "created", automationRevision: 1, automationName: "Fixed job",
+      projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/repo", source: "manual",
+      scheduledFor: "2026-01-01T00:00:00Z", queuedAt: "2026-01-01T00:00:00Z",
+      status: "completed", prompt: "Review", trigger: { type: "manual" }, configuredModel: { mode: "default" }, configuredThinking: { mode: "default" }, timeoutMs: 600000,
+    };
+    const later = { startedAt: "2026-01-02T00:00:00Z", completedAt: "2026-01-02T01:00:00Z" };
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue({
+      contractVersion: 1, ok: true, value: {
+        definitions: [], models: [], thinkingLevels: [], defaultTimeoutMs: 600000, minTimeoutMs: 60000, maxTimeoutMs: 86400000, generatedAt: "2026-01-02T01:00:00Z",
+        runs: [
+          { ...base, id: "later", ...later },
+          { ...base, id: "other", automationId: "other", automationName: "Other job", ...later },
+          { ...base, id: "first", startedAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T01:00:00Z" },
+        ],
+      },
+    });
+    const context = panelContext(backend);
+    const container = document.createElement("div"); document.body.append(container);
+    try {
+      render(panel.render(context), container); await settle(); render(panel.render(context), container);
+      const lanes = container.querySelectorAll(".timeline-lane");
+      expect(lanes).toHaveLength(2);
+      expect(lanes[0]?.getAttribute("aria-label")).toBe("Fixed job");
+      expect(lanes[0]?.querySelectorAll(".timeline-block")).toHaveLength(2);
+      expect(lanes[1]?.querySelectorAll(".timeline-block")).toHaveLength(1);
+      const fixedBlocks = lanes[0]?.querySelectorAll<HTMLElement>(".timeline-block");
+      const otherBlock = lanes[1]?.querySelector<HTMLElement>(".timeline-block");
+      expect(fixedBlocks?.[0]?.style.top).toBe("0%");
+      expect(fixedBlocks?.[1]?.style.top).toBe(otherBlock?.style.top);
+      expect(fixedBlocks?.[1]?.style.height).toBe(otherBlock?.style.height);
+      expect(fixedBlocks?.[1]?.getAttribute("tabindex")).toBe("0");
+      expect(container.querySelector(".timeline-time-heading")?.textContent).toBe("Time ↓");
     } finally { render(null, container); }
   });
 

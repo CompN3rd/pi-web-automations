@@ -21,6 +21,9 @@ export function sessionHref(machineId: string, projectId: string, workspaceId: s
   return `?${query.toString()}`;
 }
 
+export const TIMELINE_HEIGHT = 480;
+const MIN_BLOCK_PERCENT = 100 * 6 / TIMELINE_HEIGHT;
+
 export function runTimeline(runs: readonly AutomationRun[], now = Date.now()) {
   const entries = runs.flatMap((run) => {
     const start = Date.parse(run.startedAt ?? run.queuedAt);
@@ -30,6 +33,30 @@ export function runTimeline(runs: readonly AutomationRun[], now = Date.now()) {
   });
   const start = entries.length === 0 ? now : Math.min(...entries.map((entry) => entry.start));
   const end = Math.max(start + 1000, ...entries.map((entry) => entry.end));
-  // Each run gets a separate lane so overlapping and very short runs remain accessible.
-  return { start, end, blocks: entries.map((entry) => ({ ...entry, left: 100 * (entry.start - start) / (end - start), width: 100 * (entry.end - entry.start) / (end - start) })) };
+  const blocks = entries.map((entry) => {
+    // Keep even instantaneous runs focusable and inside the chart's bounds.
+    const top = Math.min(100 - MIN_BLOCK_PERCENT, 100 * (entry.start - start) / (end - start));
+    const height = Math.min(100 - top, Math.max(MIN_BLOCK_PERCENT, 100 * (entry.end - entry.start) / (end - start)));
+    return { ...entry, top, height, track: 0 };
+  });
+  const grouped = new Map<string, typeof blocks>();
+  for (const block of blocks) {
+    const group = grouped.get(block.run.automationId) ?? [];
+    group.push(block);
+    grouped.set(block.run.automationId, group);
+  }
+  const lanes = [...grouped.entries()].map(([automationId, group]) => {
+    const trackEnds: number[] = [];
+    // Only overlaps within one automation need side-by-side subtracks. Include
+    // minimum-size markers in packing so short runs cannot obscure each other.
+    group.sort((a, b) => a.start - b.start || a.run.id.localeCompare(b.run.id));
+    for (const block of group) {
+      const available = trackEnds.findIndex((trackEnd) => trackEnd <= block.top);
+      block.track = available === -1 ? trackEnds.length : available;
+      trackEnds[block.track] = block.top + block.height;
+    }
+    return { automationId, name: group[group.length - 1]?.run.automationName ?? automationId, blocks: group, trackCount: trackEnds.length };
+  }).sort((a, b) => a.name.localeCompare(b.name) || a.automationId.localeCompare(b.automationId));
+  const ticks = Array.from({ length: 5 }, (_, index) => ({ top: index * 25, time: start + (end - start) * index / 4 }));
+  return { start, end, blocks, lanes, ticks };
 }
