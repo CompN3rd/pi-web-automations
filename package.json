@@ -1,6 +1,6 @@
 {
   "name": "@compn3rd/pi-web-automations",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Durable, machine-local scheduled Pi jobs for PI WEB.",
   "license": "MIT",
   "author": "Marc Kassubeck",
@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/bundle-server.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
@@ -38,6 +38,7 @@
     "@jmfederico/pi-web": "^1.202609.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.13.3",
+    "esbuild": "^0.28.2",
     "eslint": "^10.6.0",
     "globals": "^17.7.0",
     "happy-dom": "^20.11.1",

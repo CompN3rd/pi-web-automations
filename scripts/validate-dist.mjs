@@ -4,7 +4,6 @@ import ts from "typescript";
 
 const requiredEntries = ["dist/browser/pi-web-plugin.js", "dist/server-plugin.js", "dist/companion.js"];
 for (const entry of requiredEntries) await readFile(entry);
-const capabilities = new Set(["PI_WEB_HOST_PI_SESSIONS_CAPABILITY", "PI_WEB_HOST_PI_SESSION_EVENTS_CAPABILITY", "PI_WEB_HOST_WORKSPACES_CAPABILITY"]);
 for (const path of await moduleFiles("dist")) {
   const source = await readFile(path, "utf8");
   const declaration = path.endsWith(".d.ts");
@@ -17,11 +16,7 @@ for (const path of await moduleFiles("dist")) {
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments[0] && ts.isStringLiteral(node.arguments[0])) reference = node.arguments[0].text;
     if (reference?.startsWith("@jmfederico/pi-web")) {
       const publicType = declaration && ["@jmfederico/pi-web/plugin-api", "@jmfederico/pi-web/server-plugin-api"].includes(reference);
-      const bindings = ts.isImportDeclaration(node) ? node.importClause?.namedBindings : undefined;
-      const publicRuntime = !declaration && !browser && reference === "@jmfederico/pi-web/server-plugin-api"
-        && !node.importClause?.name && bindings && ts.isNamedImports(bindings) && bindings.elements.length > 0
-        && bindings.elements.every((binding) => capabilities.has((binding.propertyName ?? binding.name).text));
-      if (!publicType && !publicRuntime) throw new Error(`PI WEB runtime import found in ${path}: ${reference}`);
+      if (!publicType) throw new Error(`PI WEB runtime import found in ${path}: ${reference}`);
     }
     if (reference?.startsWith("@earendil-works/") && !(declaration && !browser && reference === "@earendil-works/pi-coding-agent")) {
       throw new Error(`Pi imports must remain companion type boundaries: ${path}`);
@@ -31,7 +26,7 @@ for (const path of await moduleFiles("dist")) {
   inspect(tree);
   if (/(?:pi-web\/src|pi-web\/dist|\.\.\/.*pi-web)/u.test(source)) throw new Error(`private PI WEB source path found in ${path}`);
 }
-console.log(`Validated ${requiredEntries.length} package entries, public runtime capabilities and declaration import boundaries.`);
+console.log(`Validated ${requiredEntries.length} package entries, peer-free runtime imports and public declaration boundaries.`);
 async function moduleFiles(directory) {
   const paths = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {

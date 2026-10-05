@@ -4,14 +4,20 @@ Durable, machine-local scheduled Pi jobs with a workspace panel, SQLite history,
 
 **Cooperative scheduler, built on upstream's user-owned session contract.** Requires PI WEB `>=1.202609.1` (browser API v4, server API v3) and a compatible Pi coding agent (`>=0.87.0`). PI WEB `1.202609.0` predates these APIs and is not compatible.
 
+## Fixed in 0.1.1
+
+The published `0.1.0` server entry can fail with `Cannot find package '@jmfederico/pi-web'`. Pi-managed installs intentionally skip automatic peer installation, and the running host's installation is not necessarily visible to Node from the plugin directory. Rebooting does not fix that package-resolution error.
+
+Version `0.1.1` fixes the packaging by bundling the public host capability helpers into the server entry, while leaving SQLite and Croner as runtime dependencies. The managed-install check now verifies imports without either host peer installed. Update to `@compn3rd/pi-web-automations@0.1.1` or use a verified local build. Updating the package does not activate server changes until a safe, operator-controlled daemon restart; do not interrupt active sessions to apply it. This issue is separate from a web-to-daemon connection failure.
+
 ## Try it safely
 
 1. Use Node.js 22.19+ and a compatible PI WEB installation.
-2. In the target machine's **Settings → Pi packages**, install the npm package `@compn3rd/pi-web-automations` (use `@compn3rd/pi-web-automations@0.1.0` to pin this release). Install it as a **Pi package**, so both the PI WEB entries and `dist/companion.js` are discovered. Trust/enable its Pi extension and enable the `automations` PI WEB plugin. A plugin-only symlink is insufficient for companion discovery.
+2. In the target machine's **Settings → Pi packages**, install the npm package `@compn3rd/pi-web-automations` (use `@compn3rd/pi-web-automations@0.1.1` to pin this release). Install it as a **Pi package**, so both the PI WEB entries and `dist/companion.js` are discovered. Trust/enable its Pi extension and enable the `automations` PI WEB plugin. A plugin-only symlink is insufficient for companion discovery.
 3. When safe, restart the target session daemon and reload the browser. Do not restart a daemon hosting work you need to keep running.
 4. Open **Automations**, save a disabled draft, use **Run now / test**, then enable that tested revision's schedule.
 
-For source development, run `npm ci && npm run verify` in a checkout, then install the built directory as a local Pi package instead of the npm package. See the [0.1.0 release notes](docs/releases/0.1.0.md) for features and operating limitations.
+For source development, run `npm ci && npm run verify` in a checkout, then install the built directory as a local Pi package instead of the npm package. See the [0.1.1 release notes](docs/releases/0.1.1.md) for the packaging fix and the [0.1.0 release notes](docs/releases/0.1.0.md) for features and operating limitations.
 
 Fixed provider/model IDs are entered manually and validated by the companion at test/run. No silent fallback is used. Sessions are visible, user-owned conversations—not exclusively leased background runtimes. Unconfirmed execution blocks the definition, including after edits and restarts; inspect Sessions before creating a replacement.
 

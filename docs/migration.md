@@ -18,7 +18,7 @@ Automations uses the public upstream contract for durable definitions, schedules
 | Runtime shutdown | `lifetimeSignal`, then `dispose` | Event connections are revoked; do not assume disposal can cancel published work |
 | Usage | Observed assistant `message_end` usage | Partial assistant-message totals, not complete root-session accounting |
 
-No host source edits, private imports/routes, Pi CLI subprocess execution, or compatibility shims are used. Runtime PI WEB imports are limited to the three public capability constants from `@jmfederico/pi-web/server-plugin-api`; Pi APIs are a type-only extension boundary.
+No host source edits, private imports/routes, Pi CLI subprocess execution, or compatibility shims are used. Source runtime PI WEB imports are limited to the three public capability constants from `@jmfederico/pi-web/server-plugin-api`. The build bundles those public helpers and their upstream parsers into the server entry; emitted JavaScript has no runtime host-package imports. Pi APIs are a type-only extension boundary.
 
 ## Development bootstrap
 
@@ -30,11 +30,15 @@ npm run verify
 npm run pack:dry
 ```
 
-CI runs the same checks against the released host package on Windows and Linux. Direct runtime dependencies remain `better-sqlite3` and `croner`. PI WEB `^1.202609.1` is a runtime peer (the server imports its public capability constants); the Pi coding agent is also a peer, supplied by Pi when loading the companion. Both are development dependencies for local typechecking. The package ships browser and server entries, the companion, and these docs. Import, real-pack and clean production-only tarball-install validators run in `npm run verify`. The install check verifies the server and companion imports against npm-resolved peers, not an end-to-end scheduler run in a hosted Pi profile. See the [0.1.0 release notes](releases/0.1.0.md) for the initial npm release scope and operating limitations.
+CI runs the same checks against the released host package on Windows and Linux. Direct runtime dependencies remain `better-sqlite3` and `croner`. PI WEB `^1.202609.1` and the Pi coding agent remain compatibility peers supplied by the running hosts, not dependencies that must be installed next to the plugin. Both are development dependencies for local typechecking; the build also uses the public PI WEB capability helpers. Pi-managed installs disable automatic peer installation, so the emitted server bundles those helpers instead of resolving a second host package at runtime. The package ships browser and server entries, the companion, and these docs. Import, real-pack and clean production-only tarball-install validators run in `npm run verify`. The install check uses `--legacy-peer-deps`, matching Pi-managed npm installation, asserts that neither host peer is installed in the temporary fixture, and verifies server/companion imports plus exact capability requirements and parser rejection of invalid values. It is not an end-to-end scheduler run in a hosted Pi profile. See the [0.1.0 release notes](releases/0.1.0.md) for the initial npm release scope and operating limitations.
+
+## Published 0.1.0 packaging failure
+
+The published initial release imports the host capability helpers at runtime. In a Pi-managed installation this can throw `Cannot find package '@jmfederico/pi-web'` from `dist/server-plugin.js`, even when a compatible host is already running. The original clean-install validator allowed npm to auto-install peers and therefore did not reproduce the managed layout. The `0.1.1` fix bundles the public helpers, retains their validation semantics and MIT notice, and forbids host runtime imports in distribution validation. Reboots do not fix the initial artifact; update to `0.1.1` or use a verified local source build. See the [patch release notes](releases/0.1.1.md). No live installation or daemon restart is performed by these build checks.
 
 ## Install and activate
 
-Install `@compn3rd/pi-web-automations` from npm using the target machine's **Settings → Pi packages**; use `@compn3rd/pi-web-automations@0.1.0` to pin the initial release. For source development, install the built directory as a local package instead. The package declares `pi.extensions: ["dist/companion.js"]` as well as paired `piWeb.plugins` entries. Ensure the Pi package/extension is enabled and trusted. Merely linking the PI WEB plugin does not install the companion into Pi sessions.
+Install `@compn3rd/pi-web-automations` from npm using the target machine's **Settings → Pi packages**; use `@compn3rd/pi-web-automations@0.1.1` to pin the corrected release. For source development, install the built directory as a local package instead. The package declares `pi.extensions: ["dist/companion.js"]` as well as paired `piWeb.plugins` entries. Ensure the Pi package/extension is enabled and trusted. Merely linking the PI WEB plugin does not install the companion into Pi sessions.
 
 Enable `automations` in **Settings → PI WEB plugins**. Restart the target session daemon when safe, then reload the browser. Rebuild source edits with `npm run build`; server or companion changes require appropriate daemon/session reloads. Fresh automation sessions must see the companion. Do not modify plugin configuration or restart the daemon from a hosted session that must survive.
 

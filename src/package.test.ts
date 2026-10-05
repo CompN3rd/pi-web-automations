@@ -14,7 +14,7 @@ describe("standalone Automations package metadata", () => {
     const metadata: unknown = JSON.parse(await readFile("package.json", "utf8"));
     const packageRecord = record(metadata);
     expect(packageRecord["name"]).toBe("@compn3rd/pi-web-automations");
-    expect(packageRecord["version"]).toBe("0.1.0");
+    expect(packageRecord["version"]).toBe("0.1.1");
     expect(packageRecord["private"]).toBeUndefined();
     expect(packageRecord["license"]).toBe("MIT");
     expect(packageRecord["type"]).toBe("module");
@@ -39,15 +39,18 @@ describe("standalone Automations package metadata", () => {
 
   it.each([
     ["side-effect import", `import "@jmfederico/pi-web/src/private.js";`],
+    ["public capability import", `import { PI_WEB_HOST_PI_SESSIONS_CAPABILITY } from "@jmfederico/pi-web/server-plugin-api";`],
     ["non-capability public import", `import { imaginaryControl } from "@jmfederico/pi-web/server-plugin-api";`],
+    ["dynamic public import", `await import("@jmfederico/pi-web/server-plugin-api");`],
+    ["public re-export", `export { PI_WEB_HOST_WORKSPACES_CAPABILITY } from "@jmfederico/pi-web/server-plugin-api";`],
     ["re-export", `export { privateApi } from "@jmfederico/pi-web/dist/private.js";`],
   ])("rejects emitted PI WEB %s references", async (_label, source) => {
     const result = await validateDistFixture(source);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("PI WEB runtime import found in");
   });
-  it("allows only the public server runtime capability imports", async () => {
-    const result = await validateDistFixture('import { PI_WEB_HOST_PI_SESSIONS_CAPABILITY } from "@jmfederico/pi-web/server-plugin-api";');
+  it("allows public host imports in type declarations only", async () => {
+    const result = await validateDistFixture('import type { PiWebServerPlugin } from "@jmfederico/pi-web/server-plugin-api";', "public.d.ts");
     expect(result.status).toBe(0);
   });
   it("rejects runtime Pi extension imports", async () => {
@@ -58,14 +61,14 @@ describe("standalone Automations package metadata", () => {
 
 });
 
-async function validateDistFixture(source: string): Promise<{ status: number | null; stderr: string }> {
+async function validateDistFixture(source: string, filename = "forbidden.js"): Promise<{ status: number | null; stderr: string }> {
   const directory = await mkdtemp(join(tmpdir(), "pi-web-automations-dist-"));
   try {
     await mkdir(join(directory, "dist", "browser"), { recursive: true });
     await writeFile(join(directory, "dist", "browser", "pi-web-plugin.js"), "export default {};\n");
     await writeFile(join(directory, "dist", "server-plugin.js"), "export default {};\n");
     await writeFile(join(directory, "dist", "companion.js"), "export default {};\n");
-    await writeFile(join(directory, "dist", "forbidden.js"), source);
+    await writeFile(join(directory, "dist", filename), source);
     const result = spawnSync(process.execPath, [resolve("scripts/validate-dist.mjs")], { cwd: directory, encoding: "utf8" });
     return { status: result.status, stderr: result.stderr };
   } finally {
