@@ -191,6 +191,25 @@ describe("ordinary workspace chat application boundary", () => {
     await expect(f.query({ action: "enable", automationId, expectedRevision: 1 })).rejects.toThrow("successfully before enabling");
   });
 
+  it.each(["inspect", "update", "run", "enable", "pause", "delete", "cancel"])("resolves only the stored target workspace for %s", async (action) => {
+    const f = await fixture("remote-1"); f.mount(); await settle();
+    const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
+    f.resolve.mockClear();
+    f.resolve.mockImplementation((scope) => scope.workspaceId === "a-other" ? original(scope) : new Promise(() => undefined));
+    const automationId = String(f.saved[0]?.["id"]);
+    const input = { action, automationId, expectedRevision: 1, ...(action === "update" ? { patch: { prompt: "Updated promptly" } } : {}), ...(action === "cancel" ? { runId: "missing-run" } : {}) };
+    // Inspect has no revision field; use its strict request shape.
+    const request = action === "inspect" ? { action, automationId } : action === "cancel" ? { action, automationId, runId: "missing-run" } : input;
+    if (action === "enable") await expect(f.query(request)).rejects.toThrow("successfully before enabling");
+    else if (action === "cancel") await expect(f.query(request)).rejects.toThrow("run not found");
+    else await f.query(request);
+    expect(f.resolve).toHaveBeenCalled();
+    expect(f.resolve.mock.calls.every(([scope]) => scope.projectId === "p-a-other" && scope.workspaceId === "a-other")).toBe(true);
+    f.resolve.mockClear();
+    await expect(f.query({ action: "inspect", automationId: "missing-id" })).rejects.toThrow("not found");
+    expect(f.resolve).not.toHaveBeenCalled();
+  });
+
   it("cancels queued work without execution and rejects action after connection closure", async () => {
     const f = await fixture("remote-1"); f.mount(); await settle();
     const store = f.fixtureStore(); const automationId = String(f.saved[0]?.["id"]);
@@ -203,7 +222,7 @@ describe("ordinary workspace chat application boundary", () => {
     const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
     let resolutions = 0;
     f.resolve.mockImplementation(async (scope) => {
-      if (scope.workspaceId === "a-other" && ++resolutions === 2) await gate;
+      if (scope.workspaceId === "a-other" && ++resolutions === 1) await gate;
       return original(scope);
     });
     const abort = new AbortController();
@@ -227,10 +246,10 @@ describe("ordinary workspace chat application boundary", () => {
     const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
     let resolutions = 0;
     f.resolve.mockImplementation((scope) => {
-      if (scope.workspaceId === "a-other" && ++resolutions === 2) return Promise.reject(new Error("Target revoked before action"));
+      if (scope.workspaceId === "a-other" && ++resolutions === 1) return Promise.reject(new Error("Target revoked before action"));
       return original(scope);
     });
-    await expect(f.query(input)).rejects.toThrow("Target revoked before action");
+    await expect(f.query(input)).rejects.toThrow("not found");
     expect(f.createSession).not.toHaveBeenCalled();
     expect(f.fixtureStore().getDefinition(automationId)).toMatchObject({ revision: 1, enabled: false });
   });
@@ -309,12 +328,12 @@ describe("ordinary workspace chat application boundary", () => {
     const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
     let targetResolutions = 0;
     f.resolve.mockImplementation((scope) => {
-      if (scope.workspaceId === "a-other" && ++targetResolutions === 2) return Promise.reject(new Error("Target revoked before save"));
+      if (scope.workspaceId === "a-other" && ++targetResolutions === 1) return Promise.reject(new Error("Target revoked before save"));
       return original(scope);
     });
-    await expect(f.query({ ...edit, patch: { prompt: "Revoked target" } })).rejects.toThrow("Target revoked before save");
+    await expect(f.query({ ...edit, patch: { prompt: "Revoked target" } })).rejects.toThrow("not found");
     f.resolve.mockImplementation(() => Promise.reject(new Error("Authority revoked")));
-    await expect(f.query({ ...edit, patch: { prompt: "Revoked" } })).rejects.toThrow("Authority revoked");
+    await expect(f.query({ ...edit, patch: { prompt: "Revoked" } })).rejects.toThrow("not found");
     expect(await f.request("a-other", "snapshot", { contractVersion: 1 })).toMatchObject({ ok: true, value: { definitions: [{ prompt: "Saved prompt remote-1-a-other", revision: 1 }] } });
     expect(await f.request("z-current", "snapshot", { contractVersion: 1 })).toMatchObject({ ok: true, value: { definitions: [{ name: "remote-1-z-current", revision: 1 }] } });
   });

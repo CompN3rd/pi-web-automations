@@ -114,6 +114,16 @@ export class AutomationService {
     return this.store.definitionScopes();
   }
 
+  /** Routing metadata only; callers must authorize this scope before accessing the definition. */
+  definitionScope(id: string): { projectId: string; workspaceId: string } | undefined {
+    const definition = this.store.getDefinition(id);
+    return definition === undefined ? undefined : { projectId: definition.projectId, workspaceId: definition.workspaceId };
+  }
+
+  inspect(id: string, scope: AutomationScope): AutomationDefinition {
+    return this.requireDefinition(id, scope);
+  }
+
   list(scope: AutomationScope): AutomationDefinition[] {
     return this.store.listDefinitions(scope.projectId, scope.workspaceId);
   }
