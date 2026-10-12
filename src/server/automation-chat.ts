@@ -3,9 +3,18 @@ import { CHAT_REQUEST, CHAT_REPLY, chatRecord, chatString } from "../browser/cha
 import type { AutomationService } from "./automation-service.js";
 import { parseDraft, parsePatch } from "./automation-backend.js";
 
+interface ChatBinding {
+  projectId: string;
+  workspaceId: string;
+  connection: Promise<PiWebHostPiSessionConnection>;
+  connected?: PiWebHostPiSessionConnection;
+}
+
 /** Connections are authorized by the host, not by tool-supplied paths or machine ids. */
 export class AutomationChat {
-  private readonly connections = new Map<string, Promise<PiWebHostPiSessionConnection>>();
+  // Workspace aliases can share a native session bus; only one scope may subscribe.
+  private readonly connections = new Map<string, ChatBinding>();
+  private closed = false;
   constructor(
     private readonly service: AutomationService,
     private readonly events: PiWebHostPiSessionEventsV1,
@@ -14,41 +23,61 @@ export class AutomationChat {
   ) {}
 
   async bind(context: ServerPluginPeerRequestContext): Promise<{ connected: true }> {
+    this.lifetime.throwIfAborted();
+    context.signal.throwIfAborted();
+    if (this.closed) throw new Error("Automation chat connection closed");
     const input = chatRecord(context.input);
     if (Object.keys(input).some((key) => !["sessionId", "machineId", "machineName"].includes(key))) throw new Error("Unexpected chat binding field");
     const sessionId = chatString(input["sessionId"]);
     const machine = { id: chatString(input["machineId"]), name: chatString(input["machineName"]) };
     const selection = { projectId: context.project.id, workspaceId: context.workspace.id, sessionId };
-    const key = JSON.stringify(selection);
-    let connection = this.connections.get(key);
-    if (!connection) {
-      connection = this.events.connect(selection).then((connected) => {
-        if (this.lifetime.aborted || connected.signal.aborted) { connected.close(); throw new Error("Automation chat connection closed"); }
-        connected.on(CHAT_REQUEST, async (data) => {
-          let requestId: string;
-          try { requestId = chatString(chatRecord(data)["requestId"]); } catch { return; }
-          try {
-            this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
-            const value = await this.query({ projectId: selection.projectId, workspaceId: selection.workspaceId }, machine, data, connected.signal);
-            this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
-            connected.emit(CHAT_REPLY, { requestId, value });
-          } catch (error) {
-            if (!this.lifetime.aborted && !connected.signal.aborted) connected.emit(CHAT_REPLY, { requestId, error: `Selected machine ${machine.name} (${machine.id}): ${error instanceof Error ? error.message : String(error)}` });
-          }
-        });
-        connected.signal.addEventListener("abort", () => { this.connections.delete(key); }, { once: true });
-        return connected;
-      });
-      this.connections.set(key, connection);
-      void connection.catch(() => { if (this.connections.get(key) === connection) this.connections.delete(key); });
+    let binding = this.connections.get(sessionId);
+    if (binding && (binding.projectId !== selection.projectId || binding.workspaceId !== selection.workspaceId)) {
+      throw new Error("Automation chat session is already bound to a different workspace");
     }
-    await connection;
+    if (!binding) {
+      const created: ChatBinding = {
+        projectId: selection.projectId,
+        workspaceId: selection.workspaceId,
+        connection: Promise.resolve().then(() => {
+          if (this.closed || this.lifetime.aborted) throw new Error("Automation chat connection closed");
+          return this.events.connect(selection);
+        }).then((connected) => {
+          if (this.closed || this.lifetime.aborted || connected.signal.aborted) { connected.close(); throw new Error("Automation chat connection closed"); }
+          created.connected = connected;
+          connected.on(CHAT_REQUEST, async (data) => {
+            let requestId: string;
+            try { requestId = chatString(chatRecord(data)["requestId"]); } catch { return; }
+            try {
+              this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
+              const value = await this.query({ projectId: selection.projectId, workspaceId: selection.workspaceId }, machine, data, connected.signal);
+              this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
+              connected.emit(CHAT_REPLY, { requestId, value });
+            } catch (error) {
+              if (!this.lifetime.aborted && !connected.signal.aborted) connected.emit(CHAT_REPLY, { requestId, error: `Selected machine ${machine.name} (${machine.id}): ${error instanceof Error ? error.message : String(error)}` });
+            }
+          });
+          connected.signal.addEventListener("abort", () => {
+            if (this.connections.get(sessionId) === created) this.connections.delete(sessionId);
+          }, { once: true });
+          return connected;
+        }),
+      };
+      binding = created;
+      this.connections.set(sessionId, created);
+      void created.connection.catch(() => {
+        created.connected?.close();
+        if (this.connections.get(sessionId) === created) this.connections.delete(sessionId);
+      });
+    }
+    await binding.connection;
     context.signal.throwIfAborted();
     return { connected: true };
   }
 
   close(): void {
-    for (const connection of this.connections.values()) void connection.then((value) => { value.close(); }, () => undefined);
+    this.closed = true;
+    for (const binding of this.connections.values()) binding.connected?.close();
     this.connections.clear();
   }
 

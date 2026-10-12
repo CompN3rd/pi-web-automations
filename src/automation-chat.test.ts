@@ -52,10 +52,27 @@ async function fixture(machineId: string, execution = false) {
     },
   };
   registerAutomationChatTool(api);
-  const sessions = new AbortController();
-  const close = vi.fn(() => { sessions.abort(); handlers.get(CHAT_REQUEST)?.clear(); });
-  const connection: PiWebHostPiSessionConnection = { ...bus, signal: sessions.signal, close };
-  const authority = (id: string) => ({ project: { id: `p-${id}`, name: `Project ${id}`, path: `/${id}` }, workspace: { projectId: `p-${id}`, id, label: id, path: `/${id}`, isMain: true } });
+  const chatConnections: PiWebHostPiSessionConnection[] = [];
+  const chatConnection = (): PiWebHostPiSessionConnection => {
+    const sessions = new AbortController();
+    const subscriptions = new Set<() => void>();
+    const connection: PiWebHostPiSessionConnection = {
+      signal: sessions.signal,
+      on: (channel, handler) => {
+        sessions.signal.throwIfAborted();
+        const unsubscribe = bus.on(channel, (data) => { if (!sessions.signal.aborted) return handler(data); });
+        subscriptions.add(unsubscribe);
+        return () => { unsubscribe(); subscriptions.delete(unsubscribe); };
+      },
+      emit: (channel, data) => { sessions.signal.throwIfAborted(); bus.emit(channel, data); },
+      close: () => { for (const unsubscribe of subscriptions) unsubscribe(); subscriptions.clear(); sessions.abort(); },
+    };
+    chatConnections.push(connection);
+    return connection;
+  };
+  const close = vi.fn(() => { chatConnections.at(-1)?.close(); });
+  // Two host-authorized selections alias one cwd/native session, but have separate connections.
+  const authority = (id: string) => ({ project: { id: `p-${id}`, name: `Project ${id}`, path: `/${id}` }, workspace: { projectId: `p-${id}`, id, label: id, path: id === "z-alias" ? "/z-current" : `/${id}`, isMain: true } });
   let taskRequest: Record<string, unknown> | undefined;
   const taskHandlers = new Set<(data: unknown) => void | Promise<void>>();
   const taskSignal = new AbortController();
@@ -80,8 +97,8 @@ async function fixture(machineId: string, execution = false) {
   });
   const connect = vi.fn((selection: { projectId: string; workspaceId: string; sessionId: string }) => {
     if (execution && selection.sessionId === `task-${machineId}` && selection.workspaceId === "a-other") return Promise.resolve(taskConnection);
-    if (selection.sessionId !== `session-${machineId}` || selection.workspaceId !== "z-current") throw new Error("Session outside workspace or selected machine");
-    return Promise.resolve(connection);
+    if (selection.sessionId !== `session-${machineId}` || selection.projectId !== `p-${selection.workspaceId}` || authority(selection.workspaceId).workspace.path !== "/z-current") throw new Error("Session outside workspace or selected machine");
+    return Promise.resolve(chatConnection());
   });
   const resolve = vi.fn((scope: { projectId: string; workspaceId: string }) => {
     if (scope.workspaceId === "inaccessible" || scope.projectId !== `p-${scope.workspaceId}`) throw new Error("Not accessible");
@@ -124,7 +141,8 @@ async function fixture(machineId: string, execution = false) {
     render(item.render(), container);
     return container;
   };
-  return { request, query, mount, connect, saved, lifetime, close, labelContext, bus, hooks, resolve, validate, createSession, finishTask,
+  return { request, query, mount, connect, saved, lifetime, close, labelContext, bus, hooks, resolve, validate, createSession, finishTask, chatConnections,
+    chatSubscribers: () => handlers.get(CHAT_REQUEST)?.size ?? 0,
     fixtureStore: () => { const store = new AutomationStore(join(root, "automations.sqlite")); cleanups.push(() => { store.close(); }); return store; } };
 }
 
@@ -137,6 +155,94 @@ function expectSaveError(value: unknown, message: string) {
 async function settle() { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }
 
 describe("ordinary workspace chat application boundary", () => {
+  it("rejects workspace aliases during and after concurrent same-scope binds without duplicate mutations", async () => {
+    const f = await fixture("local");
+    const input = { sessionId: "session-local", machineId: "local", machineName: "Local" };
+    const selection = { projectId: "p-z-current", workspaceId: "z-current", sessionId: "session-local" };
+    // Both aliases are valid host selections and attach independent connections to the same bus.
+    const first = await f.connect(selection);
+    const alias = await f.connect({ ...selection, projectId: "p-z-alias", workspaceId: "z-alias" });
+    const seen = vi.fn(); first.on(CHAT_REQUEST, seen); alias.on(CHAT_REQUEST, seen);
+    f.bus.emit(CHAT_REQUEST, {}); expect(seen).toHaveBeenCalledTimes(2);
+    first.close(); alias.close(); f.connect.mockClear();
+
+    const original = f.connect.getMockImplementation(); if (!original) throw new Error("Missing connector");
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.connect.mockImplementationOnce(async (scope) => { await gate; return original(scope); });
+    const bind = f.request("z-current", CHAT_BIND, input);
+    const retry = f.request("z-current", CHAT_BIND, input);
+    await settle(); expect(f.connect).toHaveBeenCalledOnce();
+    await expect(f.request("z-alias", CHAT_BIND, input)).rejects.toThrow("already bound to a different workspace");
+    release?.(); await Promise.all([bind, retry]);
+    await f.request("z-current", CHAT_BIND, input);
+    await expect(f.request("z-alias", CHAT_BIND, input)).rejects.toThrow("already bound to a different workspace");
+    expect(f.connect).toHaveBeenCalledOnce(); expect(f.chatSubscribers()).toBe(1);
+    const replies = vi.fn(); f.bus.on(CHAT_REPLY, replies);
+    expect((await f.query({ action: "create", draft: { name: "Only once", prompt: "Work", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" } } }))["details"]).toMatchObject({ workspace: { id: "z-current" } });
+    await settle(); expect(replies).toHaveBeenCalledOnce();
+    const store = f.fixtureStore();
+    expect(store.listDefinitions("p-z-current", "z-current").filter((definition) => definition.name === "Only once")).toHaveLength(1);
+    expect(store.listDefinitions("p-z-alias", "z-alias")).toHaveLength(0);
+    expect((await f.query({ action: "list" }))["details"]).toMatchObject({ currentWorkspace: { id: "z-current" } });
+  });
+
+  it.each(["synchronous", "asynchronous"])("releases a failed %s binding so another authorized alias can retry", async (failure) => {
+    const f = await fixture("local");
+    const input = { sessionId: "session-local", machineId: "local", machineName: "Local" };
+    f.connect.mockImplementationOnce(() => {
+      if (failure === "synchronous") throw new Error("Connect failed");
+      return Promise.reject(new Error("Connect failed"));
+    });
+    await expect(f.request("z-current", CHAT_BIND, input)).rejects.toThrow("Connect failed");
+    expect(f.chatSubscribers()).toBe(0);
+    await f.request("z-alias", CHAT_BIND, input);
+    expect(f.connect).toHaveBeenCalledTimes(2); expect(f.chatSubscribers()).toBe(1);
+    expect((await f.query({ action: "list" }))["details"]).toMatchObject({ currentWorkspace: { id: "z-alias" } });
+  });
+
+  it("releases aborted connections for alias reconnection without stale subscriptions or cleanup", async () => {
+    const f = await fixture("local");
+    const input = { sessionId: "session-local", machineId: "local", machineName: "Local" };
+    await f.request("z-current", CHAT_BIND, input);
+    const old = f.chatConnections.at(-1); if (!old) throw new Error("Missing connection");
+    old.close(); expect(f.chatSubscribers()).toBe(0);
+    await Promise.all([f.request("z-alias", CHAT_BIND, input), f.request("z-alias", CHAT_BIND, input)]);
+    old.close();
+    await f.request("z-alias", CHAT_BIND, input);
+    await expect(f.request("z-current", CHAT_BIND, input)).rejects.toThrow("already bound to a different workspace");
+    expect(f.connect).toHaveBeenCalledTimes(2); expect(f.chatSubscribers()).toBe(1);
+    const replies = vi.fn(); f.bus.on(CHAT_REPLY, replies);
+    expect((await f.query({ action: "create", draft: { name: "Reconnected", prompt: "Work", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" } } }))["details"]).toMatchObject({ workspace: { id: "z-alias" } });
+    await settle(); expect(replies).toHaveBeenCalledOnce();
+    expect(f.fixtureStore().listDefinitions("p-z-alias", "z-alias")).toHaveLength(1);
+    f.lifetime.abort(); expect(f.chatSubscribers()).toBe(0);
+  });
+
+  it("rejects an already-aborted host connection and permits a fresh same-scope retry", async () => {
+    const f = await fixture("local");
+    const input = { sessionId: "session-local", machineId: "local", machineName: "Local" };
+    const closed = await f.connect({ projectId: "p-z-current", workspaceId: "z-current", sessionId: "session-local" });
+    closed.close(); f.connect.mockClear(); f.connect.mockResolvedValueOnce(closed);
+    await expect(f.request("z-current", CHAT_BIND, input)).rejects.toThrow("connection closed");
+    await f.request("z-current", CHAT_BIND, input);
+    expect(f.connect).toHaveBeenCalledTimes(2); expect(f.chatSubscribers()).toBe(1);
+  });
+
+  it("closes a pending host connection on backend shutdown without installing a handler", async () => {
+    const f = await fixture("local");
+    const original = f.connect.getMockImplementation(); if (!original) throw new Error("Missing connector");
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.connect.mockImplementationOnce(async (scope) => { await gate; return original(scope); });
+    const bind = f.request("z-current", CHAT_BIND, { sessionId: "session-local", machineId: "local", machineName: "Local" });
+    const check = expect(bind).rejects.toThrow("connection closed");
+    await settle(); expect(f.connect).toHaveBeenCalledOnce();
+    f.lifetime.abort(); release?.(); await check;
+    expect(f.chatConnections.at(-1)?.signal.aborted).toBe(true);
+    expect(f.chatSubscribers()).toBe(0);
+  });
+
   it.each(["local", "remote-1"])("runs/tests, enables, pauses and archives across workspaces on %s", async (machineId) => {
     const f = await fixture(machineId, true); f.mount(); await settle();
     const automationId = String(f.saved[0]?.["id"]);
@@ -275,7 +381,7 @@ describe("ordinary workspace chat application boundary", () => {
     expect(f.connect.mock.calls.filter(([selection]) => selection.sessionId === `session-${machineId}`)).toHaveLength(1);
     label.remove();
     expect((await f.query({ action: "list" }))["details"]).toMatchObject({ machine: { id: machineId } });
-    f.lifetime.abort(); await settle(); expect(f.close).toHaveBeenCalled();
+    f.lifetime.abort(); await settle(); expect(f.chatConnections.at(-1)?.signal.aborted).toBe(true);
   });
 
   it.each(["local", "remote-1"])("saves drafts and revision-guarded cross-workspace requirements on %s immediately", async (machineId) => {
