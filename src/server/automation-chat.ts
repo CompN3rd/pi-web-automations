@@ -33,7 +33,7 @@ export class AutomationChat {
             this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
             connected.emit(CHAT_REPLY, { requestId, value });
           } catch (error) {
-            if (!this.lifetime.aborted && !connected.signal.aborted) connected.emit(CHAT_REPLY, { requestId, error: error instanceof Error ? error.message : String(error) });
+            if (!this.lifetime.aborted && !connected.signal.aborted) connected.emit(CHAT_REPLY, { requestId, error: `Selected machine ${machine.name} (${machine.id}): ${error instanceof Error ? error.message : String(error)}` });
           }
         });
         connected.signal.addEventListener("abort", () => { this.connections.delete(key); }, { once: true });
@@ -57,7 +57,9 @@ export class AutomationChat {
     const action = input["action"];
     const fields = action === "list" ? [] : action === "inspect" ? ["automationId"]
       : action === "create" ? ["projectId", "workspaceId", "draft"]
-      : action === "update" ? ["automationId", "expectedRevision", "patch"] : undefined;
+      : action === "update" ? ["automationId", "expectedRevision", "patch"]
+      : ["run", "enable", "pause", "delete"].includes(String(action)) ? ["automationId", "expectedRevision"]
+      : action === "cancel" ? ["automationId", "runId"] : undefined;
     if (!fields) throw new Error("Unsupported automation chat action");
     if (Object.keys(input).some((key) => !["requestId", "action", ...fields].includes(key))) throw new Error("Unexpected automation query field");
     const currentAuthority = await this.workspaces.resolve(current);
@@ -106,6 +108,34 @@ export class AutomationChat {
           const saved = this.service.update(automationId, { ...scope, workspacePath: authority.workspace.path, expectedRevision: revision, ...patch });
           return { ...attribution, project: authority.project, workspace: authority.workspace, saved: true, definition: saved,
             message: "Saved requirements and paused schedule. Run/test the new revision successfully before enabling. Unconfirmed work remains blocked." };
+        }
+        if (action !== "inspect") {
+          const revision = input["expectedRevision"];
+          if (action !== "cancel" && (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1)) throw new Error("Action requires expectedRevision from list/inspect");
+          const authority = await this.workspaces.resolve({ projectId: scope.projectId, workspaceId: scope.workspaceId });
+          this.lifetime.throwIfAborted(); signal.throwIfAborted();
+          const target = { ...scope, workspacePath: authority.workspace.path };
+          const result = { ...attribution, project: authority.project, workspace: authority.workspace, automationId };
+          const perform = <T>(operation: () => T): T => {
+            try { return operation(); }
+            catch (error) { throw new Error(`Automation ${automationId}, project ${scope.projectId}, workspace ${scope.workspaceId}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+          };
+          if (action === "cancel") {
+            const run = perform(() => this.service.cancel(chatString(input["runId"]), target, automationId));
+            return { ...result, run, message: "Cancellation requested (or run already terminal). This is not a force-stop guarantee or proof of settlement. Inspect this run and its session; unknown work remains blocked." };
+          }
+          // Validated above, kept explicit for the service's typed revision contract.
+          if (typeof revision !== "number") throw new Error("Action requires expectedRevision");
+          if (action === "run") {
+            const run = perform(() => this.service.runNow(automationId, target, revision));
+            return { ...result, run, message: "Run/test queued, not completed. Inspect for status and the visible sessionId once created. Only successful settlement tests this revision." };
+          }
+          if (action === "delete") {
+            perform(() => { this.service.delete(automationId, target, revision); });
+            return { ...result, deleted: true, message: "Definition archived; run history and session identities retained. Deletion does not stop or confirm uncertain session work." };
+          }
+          const saved = perform(() => this.service.update(automationId, { ...target, expectedRevision: revision, enabled: action === "enable" }));
+          return { ...result, definition: saved, message: action === "enable" ? "Schedule enabled for the successfully tested revision." : "Schedule paused; this does not cancel existing runs." };
         }
         return { ...attribution, project: group.project, workspace: group.workspace, definition,
           runs: this.service.listRuns(scope, { automationId, limit: 20 }) };

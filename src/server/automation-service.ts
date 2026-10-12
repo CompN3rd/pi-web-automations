@@ -258,9 +258,9 @@ export class AutomationService {
     return run;
   }
 
-  cancel(runId: string, scope: AutomationScope): AutomationRun {
+  cancel(runId: string, scope: AutomationScope, automationId?: string): AutomationRun {
     const existing = this.store.getRunScoped(runId, scope.projectId, scope.workspaceId);
-    if (existing === undefined) throw new AutomationServiceError("Automation run not found", 404);
+    if (existing === undefined || (automationId !== undefined && existing.automationId !== automationId)) throw new AutomationServiceError("Automation run not found", 404);
     const run = this.store.requestCancellation(runId, "user", this.nowIso());
     const context = this.active.get(runId);
     if (context !== undefined) {

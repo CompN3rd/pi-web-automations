@@ -23,18 +23,19 @@ const requirements = {
 export function registerAutomationChatTool(pi: Pick<ExtensionAPI, "on" | "events" | "registerTool">): void {
   const pending = new Set<(error: Error) => void>();
   pi.on("session_shutdown", () => {
-    for (const reject of pending) reject(new Error("Automation chat session closed. If saving, inspect/list before retrying; saving may already have occurred."));
+    for (const reject of pending) reject(new Error("Automation chat session closed. If changing state, inspect/list before retrying; saving may already have occurred or another action may have been accepted."));
   });
   pi.registerTool({
     name: "automations",
     label: "Automations",
-    description: "List, inspect, create disabled drafts, or update saved Automations requirements on this PI WEB session's selected machine, across workspaces (current first). Use list/inspect to get exact automationId and expectedRevision; never substitute a duplicate name or retry a revision conflict blindly. Create uses current workspace unless BOTH exact projectId/workspaceId are supplied; never infer another workspace from a path. Use draft for create, nonempty patch for update. Explicit unambiguous user requests authorize saving immediately; ask only when target/change is ambiguous. Edits pause schedules and clear successful-test status; unconfirmed work stays blocked. Reports saved definition and machine/project/workspace. Run/enable/delete are not supported here yet. If unavailable, report error; no SQL, database hunting, local fallback, or skill loading. On timeout/cancellation inspect before retrying: saving may already have occurred.",
+    description: "List, inspect, create disabled drafts, update saved requirements, run/test, enable/pause, delete, or cancel Automations on this PI WEB session's selected machine, across workspaces (current first). Use list/inspect to get exact automationId and expectedRevision; never substitute a duplicate name or retry a revision conflict blindly. Create uses current workspace unless BOTH exact projectId/workspaceId are supplied; never infer another workspace from a path. Use draft for create, nonempty patch for update. Explicit unambiguous user requests authorize execution immediately; ask only when target/change is ambiguous. Edits pause schedules and clear successful-test status; unconfirmed work stays blocked. Reports saved definition and machine/project/workspace. Run queues a test, not completion; inspect for status/sessionId. Enable requires successful retesting of the current revision. Pause does not cancel runs. Delete archives and retains history, not a stop. Cancel requires exact automationId AND runId from inspect; cancellation intent is not confirmed settlement or force-stop. No unblock action. If unavailable, report error; no SQL, database hunting, local fallback, or skill loading. On timeout/cancellation/lost reply inspect before retrying: the action may already have been accepted, including a run or deletion.",
     // JSON Schema is intentionally dependency-free in the managed companion artifact.
     parameters: {
       type: "object", properties: {
-        action: { type: "string", enum: ["list", "inspect", "create", "update"] },
-        automationId: { type: "string", description: "Exact id from list; required for inspect/update" },
-        expectedRevision: { type: "integer", minimum: 1, description: "Revision observed in list/inspect; required for update" },
+        action: { type: "string", enum: ["list", "inspect", "create", "update", "run", "enable", "pause", "delete", "cancel"] },
+        automationId: { type: "string", description: "Exact id from list; required except list/create" },
+        expectedRevision: { type: "integer", minimum: 1, description: "Revision observed in list/inspect; required for update/run/enable/pause/delete" },
+        runId: { type: "string", description: "Exact run id from inspect; required for cancel together with automationId" },
         projectId: { type: "string", description: "Create target only; supply together with exact workspaceId, otherwise current workspace" },
         workspaceId: { type: "string", description: "Create target only; supply together with exact projectId" },
         draft: { type: "object", properties: requirements, required: ["name", "prompt", "trigger", "model", "thinking"], additionalProperties: false },
@@ -45,14 +46,16 @@ export function registerAutomationChatTool(pi: Pick<ExtensionAPI, "on" | "events
         { properties: { action: { const: "inspect" } }, required: ["automationId"] },
         { properties: { action: { const: "create" } }, required: ["draft"] },
         { properties: { action: { const: "update" } }, required: ["automationId", "expectedRevision", "patch"] },
+        { properties: { action: { enum: ["run", "enable", "pause", "delete"] } }, required: ["automationId", "expectedRevision"] },
+        { properties: { action: { const: "cancel" } }, required: ["automationId", "runId"] },
       ],
     },
     async execute(_id, params, signal) {
       const input = chatRecord(params);
-      if (!["list", "inspect", "create", "update"].includes(String(input["action"]))) throw new Error("Use list, inspect, create, or update");
-      if ((input["action"] === "inspect" || input["action"] === "update") && typeof input["automationId"] !== "string") throw new Error("Inspect/update requires an exact automationId from list");
-      const saving = input["action"] === "create" || input["action"] === "update";
-      const uncertain = saving ? " Saving may already have occurred; inspect/list before retrying." : "";
+      if (!["list", "inspect", "create", "update", "run", "enable", "pause", "delete", "cancel"].includes(String(input["action"]))) throw new Error("Use list, inspect, create, update, run, enable, pause, delete, or cancel");
+      if (!["list", "create"].includes(String(input["action"])) && typeof input["automationId"] !== "string") throw new Error("Action requires an exact automationId from list");
+      const changing = !["list", "inspect"].includes(String(input["action"]));
+      const uncertain = changing ? " Saving may already have occurred or another action may have been accepted; inspect/list before retrying." : "";
       const requestId = randomUUID();
       const value = await new Promise<unknown>((resolve, reject) => {
         const finish = (error?: Error, result?: unknown) => {

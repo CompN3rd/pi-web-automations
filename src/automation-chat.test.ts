@@ -11,13 +11,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chatLabel } from "./browser/chat-binding.js";
 import { CHAT_BIND, CHAT_REPLY, CHAT_REQUEST, chatRecord } from "./browser/chat-protocol.js";
 import { registerAutomationChatTool } from "./chat-tool.js";
+import { AUTOMATION_REPLY, AUTOMATION_REQUEST } from "./companion-protocol.js";
 import plugin from "./server-plugin.js";
 import { AutomationStore } from "./server/automation-store.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { document.body.replaceChildren(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
 
-async function fixture(machineId: string) {
+async function fixture(machineId: string, execution = false) {
   const root = mkdtempSync(join(tmpdir(), "automation-chat-"));
   cleanups.push(() => { rmSync(root, { recursive: true, force: true }); });
   const lifetime = new AbortController();
@@ -55,7 +56,30 @@ async function fixture(machineId: string) {
   const close = vi.fn(() => { sessions.abort(); handlers.get(CHAT_REQUEST)?.clear(); });
   const connection: PiWebHostPiSessionConnection = { ...bus, signal: sessions.signal, close };
   const authority = (id: string) => ({ project: { id: `p-${id}`, name: `Project ${id}`, path: `/${id}` }, workspace: { projectId: `p-${id}`, id, label: id, path: `/${id}`, isMain: true } });
+  let taskRequest: Record<string, unknown> | undefined;
+  const taskHandlers = new Set<(data: unknown) => void | Promise<void>>();
+  const taskSignal = new AbortController();
+  const taskConnection: PiWebHostPiSessionConnection = {
+    signal: taskSignal.signal, close: () => { taskSignal.abort(); },
+    on: (channel, handler) => { if (channel === AUTOMATION_REPLY) taskHandlers.add(handler); return () => { taskHandlers.delete(handler); }; },
+    emit: (channel, data) => {
+      if (channel !== AUTOMATION_REQUEST) return;
+      const request = chatRecord(data);
+      if (request["operation"] === "prepare") for (const handler of taskHandlers) void handler({ requestId: request["requestId"], operation: "prepare", status: "ready", model: { provider: "test", id: "model", name: "Fixture", thinkingLevels: ["off"] }, thinkingLevel: "off" });
+      if (request["operation"] === "run") taskRequest = request;
+      // Cancellation deliberately does not settle until the simulated companion confirms.
+    },
+  };
+  const finishTask = (status = "completed") => {
+    for (const handler of taskHandlers) void handler({ requestId: taskRequest?.["requestId"], operation: "run", status, usage: { scope: "assistant_messages", quality: "partial", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, estimatedCostMicros: 0, capturedAt: new Date().toISOString() } });
+  };
+  const createSession = vi.fn((scope: { projectId: string; workspaceId: string }) => {
+    if (!execution) return Promise.reject(new Error("Queries must not create sessions"));
+    expect(scope).toEqual({ projectId: "p-a-other", workspaceId: "a-other" });
+    return Promise.resolve({ sessionId: `task-${machineId}` });
+  });
   const connect = vi.fn((selection: { projectId: string; workspaceId: string; sessionId: string }) => {
+    if (execution && selection.sessionId === `task-${machineId}` && selection.workspaceId === "a-other") return Promise.resolve(taskConnection);
     if (selection.sessionId !== `session-${machineId}` || selection.workspaceId !== "z-current") throw new Error("Session outside workspace or selected machine");
     return Promise.resolve(connection);
   });
@@ -65,11 +89,11 @@ async function fixture(machineId: string) {
   });
   const activation = await plugin.activate(context);
   await activation.start?.({ signal: context.signal, capabilities: { resolve: (capability) => capability.parse({
-    "pi-sessions": { version: 1, create: () => Promise.reject(new Error("Queries must not create sessions")), run: () => Promise.reject(new Error("unused")) },
+    "pi-sessions": { version: 1, create: createSession, run: () => Promise.reject(new Error("unused")) },
     "pi-session-events": { version: 1, connect },
     workspaces: { version: 1, resolve },
   }[capability.id]) } });
-  cleanups.push(async () => { lifetime.abort(); await activation.dispose?.(context.signal); });
+  cleanups.push(async () => { lifetime.abort(); await activation.dispose?.(context.signal); await settle(); });
   const request = async (id: string, operation: string, input: JsonValue) => {
     const scoped: ServerPluginPeerRequestContext = { ...authority(id), operation, input, signal: new AbortController().signal };
     return activation.peer?.request?.(scoped);
@@ -100,7 +124,7 @@ async function fixture(machineId: string) {
     render(item.render(), container);
     return container;
   };
-  return { request, query, mount, connect, saved, lifetime, close, labelContext, bus, hooks, resolve, validate,
+  return { request, query, mount, connect, saved, lifetime, close, labelContext, bus, hooks, resolve, validate, createSession, finishTask,
     fixtureStore: () => { const store = new AutomationStore(join(root, "automations.sqlite")); cleanups.push(() => { store.close(); }); return store; } };
 }
 
@@ -113,6 +137,103 @@ function expectSaveError(value: unknown, message: string) {
 async function settle() { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }
 
 describe("ordinary workspace chat application boundary", () => {
+  it.each(["local", "remote-1"])("runs/tests, enables, pauses and archives across workspaces on %s", async (machineId) => {
+    const f = await fixture(machineId, true); f.mount(); await settle();
+    const automationId = String(f.saved[0]?.["id"]);
+    const target = { automationId, expectedRevision: 1 };
+    for (const action of ["run", "enable", "pause", "delete"]) {
+      expect(f.validate?.({ action, ...target })).toEqual({ action, ...target });
+      expect(() => { f.validate?.({ action, automationId }); }).toThrow("Validation failed");
+    }
+    await expect(f.query({ action: "enable", ...target })).rejects.toThrow(`Selected machine Machine ${machineId} (${machineId}): Automation ${automationId}, project p-a-other, workspace a-other: Run this automation successfully before enabling`);
+    await f.query({ action: "update", ...target, patch: { trigger: { type: "interval", intervalMs: 60000 } } });
+    target.expectedRevision = 2;
+    const queued = chatRecord((await f.query({ action: "run", ...target }))["details"]);
+    expect(queued).toMatchObject({ machine: { id: machineId }, workspace: { id: "a-other" }, automationId, run: { automationId, status: "queued", automationRevision: 2 } });
+    expect(String(queued["message"])).toContain("not completed");
+    await settle();
+    expect(f.createSession).toHaveBeenCalledOnce();
+    expect((await f.query({ action: "inspect", automationId }))["details"]).toMatchObject({ runs: [{ status: "running", sessionId: `task-${machineId}` }] });
+    await expect(f.query({ action: "delete", ...target })).rejects.toThrow();
+    f.finishTask(); await settle();
+    expect((await f.query({ action: "inspect", automationId }))["details"]).toMatchObject({ definition: { testedRevision: 2 }, runs: [{ status: "completed", sessionId: `task-${machineId}` }] });
+    const enabled = chatRecord((await f.query({ action: "enable", ...target }))["details"]);
+    expect(enabled).toMatchObject({ machine: { id: machineId }, workspace: { id: "a-other" }, definition: { enabled: true, revision: 2, testedRevision: 2 } });
+    expect(typeof chatRecord(enabled["definition"])["nextRunAt"]).toBe("string");
+    const paused = chatRecord((await f.query({ action: "pause", ...target }))["details"]);
+    expect(paused).toMatchObject({ definition: { enabled: false, testedRevision: 2 } });
+    expect(String(paused["message"])).toContain("does not cancel");
+    const deleted = chatRecord((await f.query({ action: "delete", ...target }))["details"]);
+    expect(deleted).toMatchObject({ deleted: true, automationId, workspace: { id: "a-other" } });
+    expect(String(deleted["message"])).toContain("history");
+    await expect(f.query({ action: "inspect", automationId })).rejects.toThrow("not found");
+    expect(await f.request("a-other", "snapshot", { contractVersion: 1 })).toMatchObject({ value: { definitions: [], runs: [{ automationId, status: "completed", sessionId: `task-${machineId}` }] } });
+  });
+
+  it.each(["local", "remote-1"])("reports cancellation intent separately from settlement on %s", async (machineId) => {
+    const f = await fixture(machineId, true); f.mount(); await settle();
+    const automationId = String(f.saved[0]?.["id"]);
+    const queued = chatRecord(chatRecord((await f.query({ action: "run", automationId, expectedRevision: 1 }))["details"])["run"]);
+    await settle();
+    const input = { action: "cancel", automationId, runId: String(queued["id"]) };
+    expect(f.validate?.(input)).toEqual(input);
+    expect(() => { f.validate?.({ action: "cancel", automationId }); }).toThrow("Validation failed");
+    await expect(f.query({ ...input, automationId: f.saved[1]?.["id"] })).rejects.toThrow("run not found");
+    const sibling = chatRecord(chatRecord((await f.query({ action: "create", projectId: "p-a-other", workspaceId: "a-other", draft: { name: "Same-workspace sibling", prompt: "Work", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" } } }))["details"])["definition"]);
+    await expect(f.query({ ...input, automationId: sibling["id"] })).rejects.toThrow("run not found");
+    const intent = chatRecord((await f.query(input))["details"]);
+    expect(intent).toMatchObject({ machine: { id: machineId }, workspace: { id: "a-other" }, run: { status: "cancelling", sessionId: `task-${machineId}`, attempt: { forceStopped: false } } });
+    expect(String(intent["message"])).toContain("not a force-stop");
+    expect((await f.query({ action: "inspect", automationId }))["details"]).toMatchObject({ runs: [{ status: "cancelling" }] });
+    f.finishTask("cancelled"); await settle();
+    expect((await f.query({ action: "inspect", automationId }))["details"]).toMatchObject({ definition: { enabled: false }, runs: [{ status: "cancelled", sessionId: `task-${machineId}`, attempt: { forceStopped: false } }] });
+    expect((await f.query(input))["details"]).toMatchObject({ run: { status: "cancelled" } });
+    await expect(f.query({ action: "enable", automationId, expectedRevision: 1 })).rejects.toThrow("successfully before enabling");
+  });
+
+  it("cancels queued work without execution and rejects action after connection closure", async () => {
+    const f = await fixture("remote-1"); f.mount(); await settle();
+    const store = f.fixtureStore(); const automationId = String(f.saved[0]?.["id"]);
+    const definition = store.getDefinition(automationId); if (!definition) throw new Error("Missing fixture");
+    const queued = store.createManualRun(definition, "queued-only", new Date().toISOString());
+    expect((await f.query({ action: "cancel", automationId, runId: queued.id }))["details"]).toMatchObject({ run: { status: "cancelled" } });
+    expect(f.createSession).not.toHaveBeenCalled();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
+    let resolutions = 0;
+    f.resolve.mockImplementation(async (scope) => {
+      if (scope.workspaceId === "a-other" && ++resolutions === 2) await gate;
+      return original(scope);
+    });
+    const abort = new AbortController();
+    const pending = f.query({ action: "delete", automationId, expectedRevision: 1 }, abort.signal);
+    await settle(); f.close(); abort.abort();
+    await expect(pending).rejects.toThrow("another action may have been accepted");
+    release?.(); await settle();
+    expect(store.getDefinition(automationId)).toMatchObject({ revision: 1 });
+  });
+
+  it.each(["run", "enable", "pause", "delete", "cancel"])("re-resolves action authority and rejects malformed/stale %s requests", async (action) => {
+    const f = await fixture("remote-1"); f.mount(); await settle();
+    const automationId = String(f.saved[0]?.["id"]);
+    const input = { action, automationId, ...(action === "cancel" ? { runId: "exact-run" } : { expectedRevision: 1 }) };
+    await expect(f.query({ ...input, workspacePath: "/untrusted" })).rejects.toThrow("Unexpected");
+    await expect(f.query({ ...input, automationId: f.saved[2]?.["id"] })).rejects.toThrow("not found");
+    if (action !== "cancel") {
+      await expect(f.query({ ...input, expectedRevision: 99 })).rejects.toThrow("changed by another client");
+      await expect(f.query({ ...input, expectedRevision: undefined })).rejects.toThrow("expectedRevision");
+    }
+    const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
+    let resolutions = 0;
+    f.resolve.mockImplementation((scope) => {
+      if (scope.workspaceId === "a-other" && ++resolutions === 2) return Promise.reject(new Error("Target revoked before action"));
+      return original(scope);
+    });
+    await expect(f.query(input)).rejects.toThrow("Target revoked before action");
+    expect(f.createSession).not.toHaveBeenCalled();
+    expect(f.fixtureStore().getDefinition(automationId)).toMatchObject({ revision: 1, enabled: false });
+  });
   it.each(["local", "remote-1"])("discovers and inspects only %s via label, host connection, tool and real store", async (machineId) => {
     const f = await fixture(machineId);
     const label = f.mount(); await settle();
@@ -223,6 +344,10 @@ describe("ordinary workspace chat application boundary", () => {
     const saved = chatRecord((await f.query({ action: "update", automationId: id, expectedRevision: 1, patch: { prompt: "Edited but still blocked" } }))["details"]);
     expect(saved).toMatchObject({ saved: true, definition: { revision: 2, enabled: false } });
     expect(store.hasUnknownRun(id)).toBe(true);
+    await expect(f.query({ action: "run", automationId: id, expectedRevision: 2 })).rejects.toThrow("unconfirmed work");
+    await expect(f.query({ action: "enable", automationId: id, expectedRevision: 2 })).rejects.toThrow("unconfirmed work");
+    expect((await f.query({ action: "cancel", automationId: id, runId: run.id }))["details"]).toMatchObject({ run: { status: "unknown", attempt: { forceStopped: false } } });
+    expect((await f.query({ action: "pause", automationId: id, expectedRevision: 2 }))["details"]).toMatchObject({ definition: { enabled: false } });
     expectSaveError(await f.request("a-other", "run-now", { contractVersion: 1, automationId: id, expectedRevision: 2 }), "unconfirmed work");
     expectSaveError(await f.request("a-other", "update", { contractVersion: 1, automationId: id, expectedRevision: 2, patch: { enabled: true } }), "unconfirmed work");
   });
@@ -236,8 +361,14 @@ describe("ordinary workspace chat application boundary", () => {
     await vi.advanceTimersByTimeAsync(5000); await check;
     expect(f.connect.mock.calls.every(([selection]) => selection.sessionId === "session-remote-1")).toBe(true);
     const save = f.query({ action: "create", draft: { name: "Unreachable", prompt: "Work" } });
-    const saveCheck = expect(save).rejects.toThrow("Saving may already have occurred; inspect/list before retrying");
+    const saveCheck = expect(save).rejects.toThrow("Saving may already have occurred or another action may have been accepted; inspect/list before retrying");
     await vi.advanceTimersByTimeAsync(5000); await saveCheck;
+    for (const action of ["run", "enable", "pause", "delete", "cancel"]) {
+      const pending = f.query({ action, automationId: f.saved[0]?.["id"], ...(action === "cancel" ? { runId: "unreachable" } : { expectedRevision: 1 }) });
+      const check = expect(pending).rejects.toThrow("another action may have been accepted");
+      await vi.advanceTimersByTimeAsync(5000); await check;
+    }
+    expect(f.createSession).not.toHaveBeenCalled();
     expect(await f.request("z-current", "snapshot", { contractVersion: 1 })).toMatchObject({ ok: true, value: { definitions: [{ name: "remote-1-z-current", revision: 1 }] } });
   });
 
