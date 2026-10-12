@@ -1,6 +1,7 @@
 import type { PiWebHostPiSessionConnection, PiWebHostPiSessionEventsV1, PiWebHostWorkspacesV1, ServerPluginPeerRequestContext } from "@jmfederico/pi-web/server-plugin-api";
 import { CHAT_REQUEST, CHAT_REPLY, chatRecord, chatString } from "../browser/chat-protocol.js";
 import type { AutomationService } from "./automation-service.js";
+import { parseDraft, parsePatch } from "./automation-backend.js";
 
 /** Connections are authorized by the host, not by tool-supplied paths or machine ids. */
 export class AutomationChat {
@@ -28,7 +29,7 @@ export class AutomationChat {
           try { requestId = chatString(chatRecord(data)["requestId"]); } catch { return; }
           try {
             this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
-            const value = await this.query({ projectId: selection.projectId, workspaceId: selection.workspaceId }, machine, data);
+            const value = await this.query({ projectId: selection.projectId, workspaceId: selection.workspaceId }, machine, data, connected.signal);
             this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
             connected.emit(CHAT_REPLY, { requestId, value });
           } catch (error) {
@@ -51,12 +52,25 @@ export class AutomationChat {
     this.connections.clear();
   }
 
-  private async query(current: { projectId: string; workspaceId: string }, machine: { id: string; name: string }, data: unknown) {
+  private async query(current: { projectId: string; workspaceId: string }, machine: { id: string; name: string }, data: unknown, signal: AbortSignal) {
     const input = chatRecord(data);
-    if (Object.keys(input).some((key) => !["requestId", "action", "automationId"].includes(key))) throw new Error("Unexpected automation query field");
     const action = input["action"];
-    if (action !== "list" && action !== "inspect") throw new Error("Unsupported automation chat action");
+    const fields = action === "list" ? [] : action === "inspect" ? ["automationId"]
+      : action === "create" ? ["projectId", "workspaceId", "draft"]
+      : action === "update" ? ["automationId", "expectedRevision", "patch"] : undefined;
+    if (!fields) throw new Error("Unsupported automation chat action");
+    if (Object.keys(input).some((key) => !["requestId", "action", ...fields].includes(key))) throw new Error("Unexpected automation query field");
     const currentAuthority = await this.workspaces.resolve(current);
+    this.lifetime.throwIfAborted(); signal.throwIfAborted();
+    if (action === "create") {
+      const hasTarget = input["projectId"] !== undefined || input["workspaceId"] !== undefined;
+      const scope = hasTarget ? { projectId: chatString(input["projectId"]), workspaceId: chatString(input["workspaceId"]) } : current;
+      const authority = hasTarget ? await this.workspaces.resolve(scope) : currentAuthority;
+      this.lifetime.throwIfAborted(); signal.throwIfAborted();
+      const definition = this.service.create({ ...scope, workspacePath: authority.workspace.path }, parseDraft(input["draft"]));
+      return { machine, project: authority.project, workspace: authority.workspace, saved: true, definition,
+        message: "Saved disabled draft. Run/test this revision successfully before enabling its schedule." };
+    }
     const scopes = this.service.definitionScopes();
     const ordered = [current, ...scopes.filter((scope) => scope.projectId !== current.projectId || scope.workspaceId !== current.workspaceId)];
     const groups = [];
@@ -67,7 +81,7 @@ export class AutomationChat {
         try { authority = await this.workspaces.resolve(scope); }
         catch { unavailableWorkspaces += 1; continue; }
       }
-      this.lifetime.throwIfAborted();
+      this.lifetime.throwIfAborted(); signal.throwIfAborted();
       const definitions = this.service.list({ ...scope, workspacePath: authority.workspace.path });
       groups.push({ project: authority.project, workspace: authority.workspace,
         definitions: action === "list" ? definitions.map((definition) => ({ id: definition.id, name: definition.name, description: definition.description, enabled: definition.enabled, revision: definition.revision, testedRevision: definition.testedRevision, trigger: definition.trigger })) : definitions });
@@ -77,8 +91,25 @@ export class AutomationChat {
     const automationId = chatString(input["automationId"]);
     for (const group of groups) {
       const definition = group.definitions.find((item) => item.id === automationId);
-      if (definition) return { ...attribution, project: group.project, workspace: group.workspace, definition,
-        runs: this.service.listRuns({ projectId: group.project.id, workspaceId: group.workspace.id, workspacePath: group.workspace.path }, { automationId, limit: 20 }) };
+      if (definition) {
+        const scope = { projectId: group.project.id, workspaceId: group.workspace.id, workspacePath: group.workspace.path };
+        if (action === "update") {
+          const revision = input["expectedRevision"];
+          if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1) throw new Error("Update requires expectedRevision from list/inspect");
+          const patchInput = chatRecord(input["patch"]);
+          if (Object.keys(patchInput).length === 0 || Object.hasOwn(patchInput, "enabled")) throw new Error("Provide saved requirements to edit; enabling is not a requirements edit");
+          const patch = parsePatch(patchInput);
+          if (Object.keys(patch).length === 0) throw new Error("Provide saved requirements to edit");
+          // Other workspace lookups may have awaited since this target was inspected.
+          const authority = await this.workspaces.resolve({ projectId: scope.projectId, workspaceId: scope.workspaceId });
+          this.lifetime.throwIfAborted(); signal.throwIfAborted();
+          const saved = this.service.update(automationId, { ...scope, workspacePath: authority.workspace.path, expectedRevision: revision, ...patch });
+          return { ...attribution, project: authority.project, workspace: authority.workspace, saved: true, definition: saved,
+            message: "Saved requirements and paused schedule. Run/test the new revision successfully before enabling. Unconfirmed work remains blocked." };
+        }
+        return { ...attribution, project: group.project, workspace: group.workspace, definition,
+          runs: this.service.listRuns(scope, { automationId, limit: 20 }) };
+      }
     }
     throw new Error("Automation not found in currently accessible workspaces on this machine; list and use an exact id");
   }

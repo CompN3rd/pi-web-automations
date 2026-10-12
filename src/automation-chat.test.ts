@@ -12,6 +12,7 @@ import { chatLabel } from "./browser/chat-binding.js";
 import { CHAT_BIND, CHAT_REPLY, CHAT_REQUEST, chatRecord } from "./browser/chat-protocol.js";
 import { registerAutomationChatTool } from "./chat-tool.js";
 import plugin from "./server-plugin.js";
+import { AutomationStore } from "./server/automation-store.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { document.body.replaceChildren(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
@@ -34,6 +35,7 @@ async function fixture(machineId: string) {
     emit(channel: string, data: unknown) { for (const handler of handlers.get(channel) ?? []) void handler(data); },
   };
   let execute: ((args: unknown[]) => Promise<unknown>) | undefined;
+  let validate: ((input: Record<string, JsonValue>) => unknown) | undefined;
   const hooks = new Map<string, () => void>();
   const api: Pick<ExtensionAPI, "on" | "events" | "registerTool"> = {
     events: bus,
@@ -41,7 +43,10 @@ async function fixture(machineId: string) {
     registerTool: (value) => {
       const validated: unknown = validateToolArguments(value, { type: "toolCall", id: "validation", name: value.name, arguments: { action: "list" } });
       expect(validated).toEqual({ action: "list" });
-      expect(() => { validateToolArguments(value, { type: "toolCall", id: "validation", name: value.name, arguments: { action: "create" } }); }).toThrow("Validation failed");
+      validate = (input) => validateToolArguments(value, { type: "toolCall", id: "validation", name: value.name, arguments: input });
+      expect(() => { validate?.({ action: "create", draft: { enabled: true } }); }).toThrow("Validation failed");
+      expect(() => { validate?.({ action: "create" }); }).toThrow("Validation failed");
+      expect(() => { validate?.({ action: "update", automationId: "id", patch: { name: "Edit" } }); }).toThrow("Validation failed");
       execute = async (args) => { const result: unknown = await Reflect.apply(value.execute.bind(value), value, args); return result; };
     },
   };
@@ -54,14 +59,15 @@ async function fixture(machineId: string) {
     if (selection.sessionId !== `session-${machineId}` || selection.workspaceId !== "z-current") throw new Error("Session outside workspace or selected machine");
     return Promise.resolve(connection);
   });
+  const resolve = vi.fn((scope: { projectId: string; workspaceId: string }) => {
+    if (scope.workspaceId === "inaccessible" || scope.projectId !== `p-${scope.workspaceId}`) throw new Error("Not accessible");
+    return Promise.resolve(authority(scope.workspaceId));
+  });
   const activation = await plugin.activate(context);
   await activation.start?.({ signal: context.signal, capabilities: { resolve: (capability) => capability.parse({
     "pi-sessions": { version: 1, create: () => Promise.reject(new Error("Queries must not create sessions")), run: () => Promise.reject(new Error("unused")) },
     "pi-session-events": { version: 1, connect },
-    workspaces: { version: 1, resolve: (scope: { projectId: string; workspaceId: string }) => {
-      if (scope.workspaceId === "inaccessible" || scope.projectId !== `p-${scope.workspaceId}`) throw new Error("Not accessible");
-      return Promise.resolve(authority(scope.workspaceId));
-    } },
+    workspaces: { version: 1, resolve },
   }[capability.id]) } });
   cleanups.push(async () => { lifetime.abort(); await activation.dispose?.(context.signal); });
   const request = async (id: string, operation: string, input: JsonValue) => {
@@ -94,7 +100,14 @@ async function fixture(machineId: string) {
     render(item.render(), container);
     return container;
   };
-  return { request, query, mount, connect, saved, lifetime, close, labelContext, bus, hooks };
+  return { request, query, mount, connect, saved, lifetime, close, labelContext, bus, hooks, resolve, validate,
+    fixtureStore: () => { const store = new AutomationStore(join(root, "automations.sqlite")); cleanups.push(() => { store.close(); }); return store; } };
+}
+
+function expectSaveError(value: unknown, message: string) {
+  const response = chatRecord(value);
+  expect(response["ok"]).toBe(false);
+  expect(chatRecord(response["error"])["message"]).toContain(message);
 }
 
 async function settle() { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }
@@ -125,6 +138,95 @@ describe("ordinary workspace chat application boundary", () => {
     f.lifetime.abort(); await settle(); expect(f.close).toHaveBeenCalled();
   });
 
+  it.each(["local", "remote-1"])("saves drafts and revision-guarded cross-workspace requirements on %s immediately", async (machineId) => {
+    const f = await fixture(machineId); f.mount(); await settle();
+    const draft = { name: "Chat draft", description: "Before", prompt: "Do the requested work", trigger: { type: "interval", intervalMs: 120000 }, model: { mode: "default" }, thinking: { mode: "default" }, timeoutMs: 60000 };
+    const create = { action: "create", draft };
+    expect(f.validate?.(create)).toEqual(create);
+    const result = chatRecord((await f.query(create))["details"]);
+    expect(result).toMatchObject({ saved: true, machine: { id: machineId }, workspace: { id: "z-current" }, definition: { ...draft, enabled: false, revision: 1 } });
+    const id = chatRecord(result["definition"])["id"];
+    const snapshot = chatRecord(chatRecord(await f.request("z-current", "snapshot", { contractVersion: 1 }))["value"]);
+    const definitions = snapshot["definitions"]; if (!Array.isArray(definitions)) throw new Error("Missing definitions");
+    expect(definitions.map(chatRecord).find((item) => item["id"] === id)).toMatchObject({ name: "Chat draft", enabled: false });
+    const cross = chatRecord((await f.query({ ...create, projectId: "p-empty-other", workspaceId: "empty-other" }))["details"]);
+    expect(cross).toMatchObject({ saved: true, project: { id: "p-empty-other" }, workspace: { id: "empty-other" }, definition: { workspacePath: "/empty-other", enabled: false } });
+    // Stage a tested/enabled definition in this isolated store to exercise editing's safety reset.
+    const store = f.fixtureStore();
+    const targetId = String(f.saved[0]?.["id"]);
+    const before = store.getDefinition(targetId);
+    if (!before) throw new Error("Missing fixture definition");
+    store.replaceDefinition({ ...before, description: "Old", enabled: true, testedRevision: 1, workspacePath: "/stale-saved-path" }, 1);
+    f.resolve.mockImplementation((scope) => Promise.resolve({ project: { id: scope.projectId, name: "Resolved project", path: "/fresh" }, workspace: { projectId: scope.projectId, id: scope.workspaceId, label: "Resolved", path: "/fresh", isMain: true } }));
+    const patch = { name: "Updated", description: "", prompt: "New requirements", trigger: { type: "cron", expression: "0 0 9 * * *", timeZone: "UTC" }, model: { mode: "fixed", provider: "test", id: "manual-id" }, thinking: { mode: "fixed", level: "high" }, timeoutMs: 120000 };
+    const edit = { action: "update", automationId: targetId, expectedRevision: 1, patch };
+    expect(f.validate?.(edit)).toEqual(edit);
+    const updated = chatRecord((await f.query(edit))["details"]);
+    expect(updated).toMatchObject({ saved: true, machine: { id: machineId }, workspace: { id: "a-other", path: "/fresh" }, definition: { name: "Updated", prompt: "New requirements", enabled: false, revision: 2, workspacePath: "/fresh", model: patch.model, thinking: patch.thinking, trigger: patch.trigger, timeoutMs: 120000 } });
+    expect(chatRecord(updated["definition"])).not.toHaveProperty("testedRevision");
+    expect(chatRecord(updated["definition"])).not.toHaveProperty("description");
+    await expect(f.query(edit)).rejects.toThrow("changed by another client");
+    expectSaveError(await f.request("a-other", "update", { contractVersion: 1, automationId: targetId, expectedRevision: 2, patch: { enabled: true } }), "successfully before enabling");
+    expect(store.getDefinition(targetId)).toMatchObject({ revision: 2, enabled: false });
+    expect(store.listRuns("p-a-other", "a-other")).toEqual([]);
+  });
+
+  it("refuses invalid saves, inaccessible targets and caller-supplied authority without changing saved state", async () => {
+    const f = await fixture("remote-1"); f.mount(); await settle();
+    const draft = { name: "Chat draft", prompt: "Work", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" } };
+    await expect(f.query({ action: "create", projectId: "p-inaccessible", workspaceId: "inaccessible", draft })).rejects.toThrow("Not accessible");
+    await expect(f.query({ action: "create", workspaceId: "a-other", draft })).rejects.toThrow("identity");
+    await expect(f.query({ action: "create", workspacePath: "/other", draft })).rejects.toThrow("Unexpected");
+    await expect(f.query({ action: "create", draft: { ...draft, enabled: true } })).rejects.toThrow("Unexpected");
+    await expect(f.query({ action: "create", draft: { ...draft, timeoutMs: 1 } })).rejects.toThrow("Timeout must");
+    await expect(f.query({ action: "create", draft: { ...draft, name: "remote-1-z-current" } })).rejects.toThrow("already exists");
+    const edit = { action: "update", automationId: f.saved[0]?.["id"], expectedRevision: 1 };
+    await expect(f.query({ ...edit, patch: {} })).rejects.toThrow("requirements");
+    await expect(f.query({ ...edit, patch: { enabled: true } })).rejects.toThrow("enabling");
+    await expect(f.query({ ...edit, expectedRevision: undefined, patch: { prompt: "No revision" } })).rejects.toThrow("expectedRevision");
+    await expect(f.query({ ...edit, automationId: f.saved[2]?.["id"], patch: { prompt: "No authority" } })).rejects.toThrow("not found");
+    const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
+    let targetResolutions = 0;
+    f.resolve.mockImplementation((scope) => {
+      if (scope.workspaceId === "a-other" && ++targetResolutions === 2) return Promise.reject(new Error("Target revoked before save"));
+      return original(scope);
+    });
+    await expect(f.query({ ...edit, patch: { prompt: "Revoked target" } })).rejects.toThrow("Target revoked before save");
+    f.resolve.mockImplementation(() => Promise.reject(new Error("Authority revoked")));
+    await expect(f.query({ ...edit, patch: { prompt: "Revoked" } })).rejects.toThrow("Authority revoked");
+    expect(await f.request("a-other", "snapshot", { contractVersion: 1 })).toMatchObject({ ok: true, value: { definitions: [{ prompt: "Saved prompt remote-1-a-other", revision: 1 }] } });
+    expect(await f.request("z-current", "snapshot", { contractVersion: 1 })).toMatchObject({ ok: true, value: { definitions: [{ name: "remote-1-z-current", revision: 1 }] } });
+  });
+
+  it("does not save after host connection closes during workspace resolution", async () => {
+    const f = await fixture("remote-1"); f.mount(); await settle();
+    const store = f.fixtureStore();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
+    f.resolve.mockImplementation(async (scope) => { await gate; return original(scope); });
+    const abort = new AbortController();
+    const pending = f.query({ action: "update", automationId: f.saved[0]?.["id"], expectedRevision: 1, patch: { prompt: "Must not save" } }, abort.signal);
+    f.close(); abort.abort();
+    await expect(pending).rejects.toThrow("inspect/list before retrying");
+    release?.(); await settle();
+    expect(store.getDefinition(String(f.saved[0]?.["id"]))).toMatchObject({ revision: 1, prompt: "Saved prompt remote-1-a-other" });
+  });
+
+  it("preserves unconfirmed work blocking after a chat edit", async () => {
+    const f = await fixture("local"); f.mount(); await settle();
+    const store = f.fixtureStore(); const id = String(f.saved[0]?.["id"]);
+    const definition = store.getDefinition(id); if (!definition) throw new Error("Missing fixture definition");
+    const run = store.createManualRun(definition, "uncertain", new Date().toISOString());
+    store.markRunStarting(run.id, "attempt", new Date().toISOString());
+    store.finishRun(run.id, { status: "unknown", completedAt: new Date().toISOString() });
+    const saved = chatRecord((await f.query({ action: "update", automationId: id, expectedRevision: 1, patch: { prompt: "Edited but still blocked" } }))["details"]);
+    expect(saved).toMatchObject({ saved: true, definition: { revision: 2, enabled: false } });
+    expect(store.hasUnknownRun(id)).toBe(true);
+    expectSaveError(await f.request("a-other", "run-now", { contractVersion: 1, automationId: id, expectedRevision: 2 }), "unconfirmed work");
+    expectSaveError(await f.request("a-other", "update", { contractVersion: 1, automationId: id, expectedRevision: 2, patch: { enabled: true } }), "unconfirmed work");
+  });
+
   it("fails closed when remote binding fails, with no local peer or database fallback", async () => {
     vi.useFakeTimers(); const f = await fixture("remote-1");
     f.connect.mockRejectedValue(new Error("Remote unavailable"));
@@ -133,6 +235,10 @@ describe("ordinary workspace chat application boundary", () => {
     const check = expect(query).rejects.toThrow("No local fallback");
     await vi.advanceTimersByTimeAsync(5000); await check;
     expect(f.connect.mock.calls.every(([selection]) => selection.sessionId === "session-remote-1")).toBe(true);
+    const save = f.query({ action: "create", draft: { name: "Unreachable", prompt: "Work" } });
+    const saveCheck = expect(save).rejects.toThrow("Saving may already have occurred; inspect/list before retrying");
+    await vi.advanceTimersByTimeAsync(5000); await saveCheck;
+    expect(await f.request("z-current", "snapshot", { contractVersion: 1 })).toMatchObject({ ok: true, value: { definitions: [{ name: "remote-1-z-current", revision: 1 }] } });
   });
 
   it("does not bind pending or mismatched workspace sessions and cleans up aborted queries", async () => {

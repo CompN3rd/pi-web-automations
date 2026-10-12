@@ -95,7 +95,7 @@ function scopeFromContext(context: ServerPluginPeerRequestContext): AutomationSc
   };
 }
 
-function parseDraft(value: unknown): AutomationDraft {
+export function parseDraft(value: unknown): AutomationDraft {
   const record = recordWithKeys(value, ["name", "description", "prompt", "trigger", "model", "thinking", "timeoutMs"]);
   return {
     name: stringValue(record["name"], "name"),
@@ -108,7 +108,7 @@ function parseDraft(value: unknown): AutomationDraft {
   };
 }
 
-function parsePatch(value: unknown): AutomationPatch {
+export function parsePatch(value: unknown): AutomationPatch {
   const record = recordWithKeys(value, ["name", "description", "prompt", "trigger", "model", "thinking", "timeoutMs", "enabled"]);
   return {
     ...(record["name"] === undefined ? {} : { name: stringValue(record["name"], "name") }),
