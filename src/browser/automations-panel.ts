@@ -23,13 +23,15 @@ import type {
 
 import { automationColor, costSummary, formatCost, runTimeline, sessionHref, TIMELINE_HEIGHT } from "./run-visualization.js";
 
+import { chatLabel } from "./chat-binding.js";
+
 const AUTOMATIONS_PANEL_ID = "workspace.automations";
 const activityElementTag = "pi-web-automations-activity";
 
 export function createAutomationsBrowserContributions(html: HtmlTemplateTag, svg: SvgTemplateTag): PluginContributions {
   const controller = new AutomationsController();
   defineActivityElement();
-  return { workspacePanels: [createPanel(html, svg, controller)] };
+  return { workspacePanels: [createPanel(html, svg, controller)], workspaceLabels: [chatLabel(html)] };
 }
 
 function createPanel(html: HtmlTemplateTag, svg: SvgTemplateTag, controller: AutomationsController): WorkspacePanelContribution {

@@ -117,6 +117,13 @@ export class AutomationStore {
     return rows.map(automationFromRow);
   }
 
+  definitionScopes(): { projectId: string; workspaceId: string }[] {
+    return this.db.prepare<[], { projectId: string; workspaceId: string }>(`
+      SELECT DISTINCT project_id AS projectId, workspace_id AS workspaceId FROM automations
+      WHERE deleted_at IS NULL ORDER BY project_id, workspace_id
+    `).all();
+  }
+
   getDefinition(id: string): AutomationDefinition | undefined {
     const row = this.db.prepare<[string], AutomationRow>("SELECT * FROM automations WHERE id = ? AND deleted_at IS NULL").get(id);
     return row === undefined ? undefined : automationFromRow(row);

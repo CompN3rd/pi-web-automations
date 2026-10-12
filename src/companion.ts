@@ -1,3 +1,4 @@
+import { registerAutomationChatTool } from "./chat-tool.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AUTOMATION_REPLY, AUTOMATION_REQUEST, isRecord, isRequest, type CompanionReply } from "./companion-protocol.js";
 import type { AutomationUsageSnapshot } from "./browser/contracts.js";
@@ -18,7 +19,8 @@ interface Task {
 const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /** Session-local companion, not an exclusive host lease. Pi owns event listener cleanup. */
-export default function companion(pi: Pick<ExtensionAPI, "on" | "events" | "setModel" | "getThinkingLevel" | "setThinkingLevel" | "sendUserMessage">): void {
+export default function companion(pi: Pick<ExtensionAPI, "on" | "events" | "setModel" | "getThinkingLevel" | "setThinkingLevel" | "sendUserMessage" | "registerTool">): void {
+  registerAutomationChatTool(pi);
   let context: ExtensionContext | undefined;
   let active: Task | undefined;
   let abandoned: { requestId: string; error: string } | undefined;

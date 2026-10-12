@@ -110,6 +110,10 @@ export class AutomationService {
     this.store.close();
   }
 
+  definitionScopes(): { projectId: string; workspaceId: string }[] {
+    return this.store.definitionScopes();
+  }
+
   list(scope: AutomationScope): AutomationDefinition[] {
     return this.store.listDefinitions(scope.projectId, scope.workspaceId);
   }

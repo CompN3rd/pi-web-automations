@@ -18,6 +18,7 @@ function fixture() {
   const send = vi.fn<ExtensionAPI["sendUserMessage"]>();
   const setModel = vi.fn<ExtensionAPI["setModel"]>(() => Promise.resolve(true));
   const api = {
+    registerTool: vi.fn(),
     on: (event: string, handler: (...args: never[]) => unknown) => { hooks.set(event, handler); return () => { hooks.delete(event); }; },
     events: {
       on: (channel: string, handler: (data: unknown) => void) => { expect(channel).toBe(AUTOMATION_REQUEST); onRequest = handler; return () => undefined; },
