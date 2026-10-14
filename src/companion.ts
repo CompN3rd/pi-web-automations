@@ -39,7 +39,8 @@ export default function companion(pi: Pick<ExtensionAPI, "on" | "events" | "setM
   pi.on("session_shutdown", () => { abandon("Session shut down or reloaded; inspect the conversation"); context = undefined; });
   pi.on("before_agent_start", (event) => {
     if (!active) return;
-    if (active.phase === "running" && !active.started && event.prompt === active.prompt) active.started = true;
+    // Pi 1.2 also starts runs from custom messages, which have no user prompt.
+    if (active.phase === "running" && !active.started && "prompt" in event && event.prompt === active.prompt) active.started = true;
     else abandon("Another prompt interfered; inspect the conversation before replacing this automation");
   });
   pi.on("message_start", (event) => {
