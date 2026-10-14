@@ -18,6 +18,7 @@ function fixture() {
   const send = vi.fn<ExtensionAPI["sendUserMessage"]>();
   const setModel = vi.fn<ExtensionAPI["setModel"]>(() => Promise.resolve(true));
   const api = {
+    registerTool: vi.fn(),
     on: (event: string, handler: (...args: never[]) => unknown) => { hooks.set(event, handler); return () => { hooks.delete(event); }; },
     events: {
       on: (channel: string, handler: (data: unknown) => void) => { expect(channel).toBe(AUTOMATION_REQUEST); onRequest = handler; return () => undefined; },
@@ -47,19 +48,34 @@ function fixture() {
 }
 
 describe("Automations Pi companion", () => {
-  it("validates policies then completes only at agent_settled, including automatic retry usage", async () => {
+  it.each(["user", undefined])("validates policies then completes only at agent_settled (messageType=%s), including automatic retry usage", async (messageType) => {
     const f = fixture();
     await f.event("session_start"); await f.prepare();
     expect(f.replies).toEqual([expect.objectContaining({ operation: "prepare", status: "ready", thinkingLevel: "medium" })]);
     expect(f.setModel).toHaveBeenCalledWith(model);
     await f.request("run", { prompt: "Review" });
     expect(f.send).toHaveBeenCalledWith("Review");
-    await f.event("before_agent_start", { prompt: "Review" });
+    await f.event("before_agent_start", { ...(messageType === undefined ? {} : { messageType }), prompt: "Review" });
     await f.assistant("error"); await f.event("agent_end");
     expect(f.replies).toHaveLength(1);
     await f.assistant("stop"); await f.event("agent_settled");
     expect(f.replies.at(-1)).toMatchObject({ status: "completed", operation: "run", usage: { tokens: { total: 12 }, estimatedCostMicros: 10000 } });
     await f.request("cancel");
+    expect(f.abort).not.toHaveBeenCalled();
+  });
+  it.each([false, true])("abandons custom-message startup (already started=%s) without cancelling or attributing unrelated work", async (started) => {
+    const f = fixture(); await f.event("session_start"); await f.prepare();
+    await f.request("run", { prompt: "Review" });
+    if (started) await f.event("before_agent_start", { messageType: "user", prompt: "Review" });
+    // Even identical content belongs to the other extension's custom-message run.
+    await f.event("before_agent_start", {
+      messageType: "custom", message: { role: "custom", customType: "other-extension", content: "Review", display: true },
+    });
+    await f.request("cancel"); await f.assistant("stop"); await f.event("agent_settled");
+    expect(f.replies).toEqual([
+      expect.objectContaining({ operation: "prepare", status: "ready" }),
+      expect.objectContaining({ operation: "run", status: "unknown" }),
+    ]);
     expect(f.abort).not.toHaveBeenCalled();
   });
   it.each(["model", "thinking", "authentication"])("rejects unavailable fixed %s without a prompt or fallback", async (policy) => {

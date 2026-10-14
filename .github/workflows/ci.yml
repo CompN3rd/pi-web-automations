@@ -38,3 +38,10 @@ jobs:
 
       - name: Inspect dry-run package manifest
         run: npm run pack:dry
+
+      - name: Install minimum supported host peers
+        # Exercise the minimum host pair without changing metadata or the lockfile.
+        run: npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@1.0.0 @jmfederico/pi-web@1.202610.3
+
+      - name: Verify minimum supported host peers
+        run: npm run verify

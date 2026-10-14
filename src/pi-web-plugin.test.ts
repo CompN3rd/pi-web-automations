@@ -178,6 +178,7 @@ describe("standalone Automations browser plugin", () => {
 function panelContext(request: ((operation: string, input: JsonValue) => Promise<JsonValue>) | undefined, requestRender = vi.fn()): WorkspacePanelContext {
   const unused = (): Promise<never> => Promise.reject(new Error("not used"));
   return {
+    navigate: vi.fn(() => Promise.resolve()),
     machine: { id: "local", name: "Local", kind: "local" },
     workspace: { id: "workspace-1", projectId: "project-1", path: "/repo", label: "main", isMain: true },
     files: { readFile: unused, listFiles: unused, writeFile: unused, deleteFile: unused, moveFile: unused },

@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import { PI_WEB_HOST_PI_SESSIONS_CAPABILITY, PI_WEB_HOST_PI_SESSION_EVENTS_CAPABILITY, PI_WEB_HOST_WORKSPACES_CAPABILITY } from "@jmfederico/pi-web/server-plugin-api";
 import type { PiWebServerPlugin, ServerPluginActivation, ServerPluginActivationContext } from "@jmfederico/pi-web/server-plugin-api";
+import { CHAT_BIND } from "./browser/chat-protocol.js";
+import { AutomationChat } from "./server/automation-chat.js";
 import { AutomationBackend } from "./server/automation-backend.js";
 import { AutomationService, type AutomationServiceLogger } from "./server/automation-service.js";
 import { AutomationSessionRunner } from "./server/automation-session-runner.js";
@@ -17,17 +19,28 @@ export default plugin;
 export function createAutomationActivation(context: ServerPluginActivationContext): ServerPluginActivation {
   let store: AutomationStore | undefined;
   let service: AutomationService | undefined;
+  let chat: AutomationChat | undefined;
   let phase = "inactive";
   let failure: string | undefined;
   const backend = new AutomationBackend(() => phase === "ready" && !context.lifetimeSignal.aborted ? service : undefined);
   const quiesce = () => {
     phase = "stopping";
+    chat?.close();
     // Synchronously stop ingress, scheduling and deadlines before host disposal disconnects dependencies.
     void service?.stop().catch((error: unknown) => { context.logger.error(`Automations shutdown failed: ${String(error)}`); });
   };
   context.lifetimeSignal.addEventListener("abort", quiesce, { once: true });
   return {
-    peer: { request(request) { request.signal.throwIfAborted(); context.lifetimeSignal.throwIfAborted(); return backend.request(request); } },
+    peer: {
+      request(request) {
+        request.signal.throwIfAborted(); context.lifetimeSignal.throwIfAborted();
+        if (request.operation === CHAT_BIND) {
+          if (!chat || phase !== "ready") throw new Error("Automation chat is not ready");
+          return chat.bind(request);
+        }
+        return backend.request(request);
+      },
+    },
     start({ capabilities }) {
       try {
         context.lifetimeSignal.throwIfAborted();
@@ -37,6 +50,7 @@ export function createAutomationActivation(context: ServerPluginActivationContex
         store = new AutomationStore(join(context.dataDirectory, "automations.sqlite"));
         service = new AutomationService(store, new AutomationSessionRunner(sessions, events, workspaces, context.lifetimeSignal), pluginLogger(context));
         service.start();
+        chat = new AutomationChat(service, events, workspaces, context.lifetimeSignal);
         phase = "ready";
       } catch (error) {
         phase = "failed";
@@ -47,6 +61,7 @@ export function createAutomationActivation(context: ServerPluginActivationContex
     async dispose() {
       if (phase === "stopped") return;
       context.lifetimeSignal.removeEventListener("abort", quiesce);
+      chat?.close();
       try { await service?.stop(); }
       finally {
         if (service) service.dispose(); else store?.close();

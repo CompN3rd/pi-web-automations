@@ -36,6 +36,7 @@ function success(value: unknown): JsonValue {
 function context(request: (operation: string, input: JsonValue) => Promise<JsonValue>, machineId = "local", workspaceId = "workspace-1") {
   const requestRender = vi.fn();
   const value: WorkspacePanelContext = {
+    navigate: vi.fn(() => Promise.resolve()),
     machine: { id: machineId, name: machineId, kind: "local" },
     workspace: { id: workspaceId, projectId: "project-1", path: "/repo", label: workspaceId, isMain: true },
     files: fileMethods(),

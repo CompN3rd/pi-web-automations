@@ -110,6 +110,20 @@ export class AutomationService {
     this.store.close();
   }
 
+  definitionScopes(): { projectId: string; workspaceId: string }[] {
+    return this.store.definitionScopes();
+  }
+
+  /** Routing metadata only; callers must authorize this scope before accessing the definition. */
+  definitionScope(id: string): { projectId: string; workspaceId: string } | undefined {
+    const definition = this.store.getDefinition(id);
+    return definition === undefined ? undefined : { projectId: definition.projectId, workspaceId: definition.workspaceId };
+  }
+
+  inspect(id: string, scope: AutomationScope): AutomationDefinition {
+    return this.requireDefinition(id, scope);
+  }
+
   list(scope: AutomationScope): AutomationDefinition[] {
     return this.store.listDefinitions(scope.projectId, scope.workspaceId);
   }
@@ -254,9 +268,9 @@ export class AutomationService {
     return run;
   }
 
-  cancel(runId: string, scope: AutomationScope): AutomationRun {
+  cancel(runId: string, scope: AutomationScope, automationId?: string): AutomationRun {
     const existing = this.store.getRunScoped(runId, scope.projectId, scope.workspaceId);
-    if (existing === undefined) throw new AutomationServiceError("Automation run not found", 404);
+    if (existing === undefined || (automationId !== undefined && existing.automationId !== automationId)) throw new AutomationServiceError("Automation run not found", 404);
     const run = this.store.requestCancellation(runId, "user", this.nowIso());
     const context = this.active.get(runId);
     if (context !== undefined) {

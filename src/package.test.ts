@@ -14,18 +14,18 @@ describe("standalone Automations package metadata", () => {
     const metadata: unknown = JSON.parse(await readFile("package.json", "utf8"));
     const packageRecord = record(metadata);
     expect(packageRecord["name"]).toBe("@compn3rd/pi-web-automations");
-    expect(packageRecord["version"]).toBe("0.1.1");
+    expect(packageRecord["version"]).toBe("0.1.2");
     expect(packageRecord["private"]).toBeUndefined();
     expect(packageRecord["license"]).toBe("MIT");
     expect(packageRecord["type"]).toBe("module");
     expect(packageRecord["files"]).toEqual(["dist", "docs", "README.md", "LICENSE"]);
     expect(record(packageRecord["dependencies"])).toEqual({ "better-sqlite3": "^13.0.3", croner: "^10.0.1" });
-    expect(record(packageRecord["devDependencies"])["@jmfederico/pi-web"]).toBe("^1.202609.1");
+    expect(record(packageRecord["devDependencies"])["@jmfederico/pi-web"]).toBe("^1.202610.3");
     expect(record(packageRecord["pi"])["extensions"]).toEqual(["dist/companion.js"]);
-    expect(record(packageRecord["devDependencies"])["@earendil-works/pi-coding-agent"]).toBe("^0.87.1");
+    expect(record(packageRecord["devDependencies"])["@earendil-works/pi-coding-agent"]).toBe("^1.2.0");
     expect(record(packageRecord["peerDependencies"])).toEqual({
-      "@earendil-works/pi-coding-agent": "*",
-      "@jmfederico/pi-web": "^1.202609.1",
+      "@earendil-works/pi-coding-agent": "^1.0.0",
+      "@jmfederico/pi-web": "^1.202610.3",
     });
     expect(record(packageRecord["engines"])["node"]).toBe(">=22.19.0");
     expect(record(packageRecord["piWeb"])["plugins"]).toEqual([{
