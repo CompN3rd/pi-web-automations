@@ -67,7 +67,9 @@
     "pi-web",
     "automations",
     "scheduler",
-    "coding-agent"
+    "coding-agent",
+    "pi-web.dev-plugin",
+    "pi-web-plugin"
   ],
   "piWeb": {
     "plugins": [

@@ -48,3 +48,13 @@ Read the [migration and compatibility report](docs/migration.md) **before moving
 Plugins and prompts execute with the target machine's account permissions. Review sources and prompts; cancellation cannot undo completed effects.
 
 MIT; see [LICENSE](LICENSE).
+
+## Community discovery
+
+This package declares `piWeb.plugins` and the `pi-web.dev-plugin`, `pi-package`,
+and `pi-web-plugin` npm keywords required by the
+[PI WEB community directory](https://pi-web.dev/community-plugins). No separate
+registration or submission is needed. Discovery requires publishing a new public
+npm version containing this metadata; npm search indexing may take time. Source
+changes alone do not update the directory. The compatibility and installation
+requirements above still apply.
