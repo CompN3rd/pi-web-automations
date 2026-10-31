@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -41,6 +41,54 @@ afterEach(() => {
 });
 
 describe("AutomationStore", () => {
+  it("opens a better-sqlite3 0.1.2 database preserving definitions, history, usage and recovery fences", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-web-automation-legacy-"));
+    tempRoots.push(root);
+    const path = join(root, "automations.sqlite");
+    copyFileSync("src/fixtures/legacy-0.1.2.sqlite", path);
+    const db = new AutomationStore(path);
+    stores.push(db);
+    expect(db.getDefinition("legacy-completed")).toMatchObject({
+      prompt: "Retain this prompt", revision: 1, testedRevision: 1, enabled: false,
+      projectId: "project-legacy", workspaceId: "workspace-legacy",
+    });
+    expect(db.getRun("legacy-run")).toMatchObject({
+      status: "completed", sessionId: "legacy-session",
+      usage: { quality: "partial", estimatedCostMicros: 123, tokens: { total: 12 } },
+      attempt: { id: "legacy-attempt", status: "completed", forceStopped: false },
+    });
+    expect(db.costStatistics("project-legacy", "workspace-legacy")).toContainEqual({
+      automationId: "legacy-completed", count: 1, priced: 1, totalMicros: 123,
+    });
+    expect(db.recoverInterruptedRuns("2026-07-25T12:00:00.000Z")).toMatchObject([
+      { id: "legacy-interrupted", status: "unknown", attempt: { status: "unknown" } },
+    ]);
+    const unconfirmed = db.getDefinition("legacy-unconfirmed");
+    expect(unconfirmed).toBeDefined();
+    if (unconfirmed === undefined) throw new Error("Missing legacy definition");
+    expect(() => db.createManualRun(unconfirmed, "unsafe-retry", "2026-07-25T12:00:00.000Z")).toThrow("unconfirmed");
+    db.close();
+    const reopened = new AutomationStore(path);
+    stores.push(reopened);
+    expect(reopened.hasUnknownRun("legacy-unconfirmed")).toBe(true);
+    expect(reopened.getRun("legacy-run")?.usage?.estimatedCostMicros).toBe(123);
+  });
+
+  it("enforces occurrence and overlap guards across independent connections", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-web-automation-connections-"));
+    tempRoots.push(root);
+    const path = join(root, "automations.sqlite");
+    const first = new AutomationStore(path);
+    const second = new AutomationStore(path);
+    stores.push(first, second);
+    const at = "2026-07-24T12:00:00.000Z";
+    const automation = first.insertDefinition(definition({ enabled: true, nextRunAt: at }));
+    first.claimScheduledOccurrence(automation, "2026-07-25T12:00:00.000Z", at, "scheduled-first");
+    expect(() => second.claimScheduledOccurrence(automation, "2026-07-25T12:00:00.000Z", at, "scheduled-second")).toThrow("schedule changed");
+    expect(() => second.createManualRun(automation, "manual-overlap", at)).toThrow("active run");
+    expect(second.listRuns(automation.projectId, automation.workspaceId)).toHaveLength(1);
+  });
+
   it("aggregates costs across retained history independently of the run list limit and scope", () => {
     const db = store();
     const automation = db.insertDefinition(definition());

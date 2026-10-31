@@ -37,7 +37,16 @@ try {
   for (const capability of plugin.requires) {
     assert.throws(() => capability.parse({ version: 2 }), `Packaged capability ${capability.id} must reject invalid values`);
   }
-  console.log("Validated managed production-only tarball install without host peers and server/companion imports.");
+  assert.equal(manifest.dependencies["better-sqlite3"], undefined, "SQLite must be supplied by the runtime");
+  assert.equal(existsSync(join(directory, "node_modules", "better-sqlite3")), false);
+  const { AutomationStore } = await import(pathToFileURL(join(root, "dist/server/automation-store.js")).href);
+  const store = new AutomationStore(join(directory, "install-smoke.sqlite"));
+  try {
+    assert.deepEqual(store.listDefinitions("empty-project", "empty-workspace"), []);
+  } finally {
+    store.close();
+  }
+  console.log("Validated managed production-only tarball install without host peers/native SQLite addon, server/companion imports and runtime SQLite initialization.");
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

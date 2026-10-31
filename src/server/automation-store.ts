@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import Database from "better-sqlite3";
+import { RuntimeDatabase } from "./sqlite.js";
+import type { SQLInputValue } from "node:sqlite";
 import type {
   AutomationAttempt,
   AutomationAttemptStatus,
@@ -93,15 +94,19 @@ export class AutomationStoreConflictError extends Error {
 }
 
 export class AutomationStore {
-  private readonly db: Database.Database;
+  private readonly db: RuntimeDatabase;
 
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.db = new Database(path);
-    this.db.pragma("foreign_keys = ON");
-    this.db.pragma("busy_timeout = 5000");
-    if (path !== ":memory:") this.db.pragma("journal_mode = WAL");
-    this.migrate();
+    this.db = new RuntimeDatabase(path);
+    try {
+      this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+      if (path !== ":memory:") this.db.exec("PRAGMA journal_mode = WAL;");
+      this.migrate();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   close(): void {
@@ -245,7 +250,7 @@ export class AutomationStore {
       this.db.prepare(`
         UPDATE automations SET next_run_at = ?, enabled = ?, updated_at = ?
         WHERE id = ? AND revision = ? AND next_run_at = ?
-      `).run(nextRunAt ?? null, nextRunAt === undefined ? 0 : 1, now, definition.id, definition.revision, definition.nextRunAt);
+      `).run(nextRunAt ?? null, nextRunAt === undefined ? 0 : 1, now, definition.id, definition.revision, definition.nextRunAt ?? null);
       return run;
     })();
   }
@@ -457,7 +462,7 @@ export class AutomationStore {
 
   hasActiveRun(automationId: string): boolean {
     const placeholders = ACTIVE_RUN_STATUSES.map(() => "?").join(", ");
-    const row = this.db.prepare<unknown[], { found: number }>(`
+    const row = this.db.prepare<SQLInputValue[], { found: number }>(`
       SELECT 1 AS found FROM automation_runs
       WHERE automation_id = ? AND status IN (${placeholders}) LIMIT 1
     `).get(automationId, ...ACTIVE_RUN_STATUSES);

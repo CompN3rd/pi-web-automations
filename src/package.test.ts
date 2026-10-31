@@ -19,7 +19,7 @@ describe("standalone Automations package metadata", () => {
     expect(packageRecord["license"]).toBe("MIT");
     expect(packageRecord["type"]).toBe("module");
     expect(packageRecord["files"]).toEqual(["dist", "docs", "README.md", "LICENSE"]);
-    expect(record(packageRecord["dependencies"])).toEqual({ "better-sqlite3": "^13.0.3", croner: "^10.0.1" });
+    expect(record(packageRecord["dependencies"])).toEqual({ croner: "^10.0.1" });
     expect(record(packageRecord["devDependencies"])["@jmfederico/pi-web"]).toBe("^1.202610.3");
     expect(record(packageRecord["pi"])["extensions"]).toEqual(["dist/companion.js"]);
     expect(record(packageRecord["devDependencies"])["@earendil-works/pi-coding-agent"]).toBe("^1.2.0");
