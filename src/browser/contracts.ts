@@ -3,11 +3,6 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export const AUTOMATIONS_CONTRACT_VERSION = 1;
 export const AUTOMATIONS_OPERATIONS = Object.freeze({
   snapshot: "snapshot",
-  create: "create",
-  update: "update",
-  delete: "delete",
-  runNow: "run-now",
-  cancelRun: "cancel-run",
 } as const);
 
 export type AutomationTrigger =

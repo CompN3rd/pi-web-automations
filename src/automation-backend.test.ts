@@ -1,123 +1,55 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ServerPluginPeerRequestContext } from "@jmfederico/pi-web/server-plugin-api";
-import { AUTOMATIONS_OPERATIONS } from "./browser/contracts.js";
-import { AutomationBackend } from "./server/automation-backend.js";
+import { AutomationBackend, parseDraft, parsePatch } from "./server/automation-backend.js";
 import { AutomationService } from "./server/automation-service.js";
-import type { AutomationModel, AutomationUsageSnapshot } from "./server/contracts.js";
-import type { CreatedAutomationSession } from "./server/automation-session-runner.js";
 import { AutomationStore } from "./server/automation-store.js";
-
-const model: AutomationModel = { provider: "test", id: "model", name: "Test", thinkingLevels: ["medium"] };
-const usage: AutomationUsageSnapshot = { scope: "root_session", quality: "estimated", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, capturedAt: "2026-01-01T00:00:00.000Z" };
-
-class PendingRunner {
-  readonly createInputs: unknown[] = [];
-  models(): AutomationModel[] { return [model]; }
-  create(input: unknown): Promise<CreatedAutomationSession> { this.createInputs.push(input); return new Promise(() => undefined); }
-  run(): Promise<AutomationUsageSnapshot> { return Promise.resolve(usage); }
-  snapshot(): Promise<AutomationUsageSnapshot> { return Promise.resolve(usage); }
-  abort(): Promise<void> { return Promise.resolve(); }
-  forceStop(): Promise<void> { return Promise.resolve(); }
-  release(): Promise<void> { return Promise.resolve(); }
-}
 
 function context(operation: string, input: ServerPluginPeerRequestContext["input"]): ServerPluginPeerRequestContext {
   return {
     project: { id: "project-1", name: "Project", path: "/registered" },
     workspace: { id: "workspace-1", projectId: "project-1", path: "/authoritative", label: "main", isMain: true },
-    operation,
-    input,
-    signal: new AbortController().signal,
+    operation, input, signal: new AbortController().signal,
   };
 }
+const draft = { name: "Review", prompt: "Review", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" } };
 
-function draft() {
-  return { name: "Review", prompt: "Review", trigger: { type: "manual" as const }, model: { mode: "fixed" as const, provider: "test", id: "model" }, thinking: { mode: "fixed" as const, level: "medium" }, timeoutMs: 60_000 };
-}
-
-describe("AutomationBackend", () => {
-  it("rejects caller-supplied scope and unknown fields in its package envelope", async () => {
+describe("AutomationBackend read-only snapshot", () => {
+  function fixture() {
     const store = new AutomationStore(":memory:");
-    const service = new AutomationService(store, new PendingRunner());
-    const backend = new AutomationBackend(() => service);
-    await expect(backend.request(context(AUTOMATIONS_OPERATIONS.create, { contractVersion: 1, draft: { ...draft(), cwd: "/evil" } }))).resolves.toMatchObject({
-      ok: false,
-      error: { code: "invalid-input", message: "Unexpected input field: cwd" },
-    });
-    await expect(backend.request(context(AUTOMATIONS_OPERATIONS.snapshot, { contractVersion: 1, projectId: "other" }))).resolves.toMatchObject({ ok: false, error: { code: "invalid-input" } });
-    store.close();
-  });
-
-  it("uses authoritative context scope and returns queued runs without awaiting lease acquisition", async () => {
-    const store = new AutomationStore(":memory:");
-    const runner = new PendingRunner();
-    const service = new AutomationService(store, runner);
-    const backend = new AutomationBackend(() => service);
-    const created = await backend.request(context(AUTOMATIONS_OPERATIONS.create, { contractVersion: 1, draft: draft() }));
-    expect(created).toMatchObject({ ok: true, value: { projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/authoritative", revision: 1 } });
-    const definition = record(record(created)["value"]);
-    const automationId = stringValue(definition["id"]);
-    const revision = numberValue(definition["revision"]);
-
-    const run = await backend.request(context(AUTOMATIONS_OPERATIONS.runNow, { contractVersion: 1, automationId, expectedRevision: revision }));
-    expect(run).toMatchObject({ ok: true, value: { automationRevision: 1 } });
-    expect(runner.createInputs).toEqual([{ projectId: "project-1", workspaceId: "workspace-1", model: { mode: "fixed", provider: "test", id: "model", name: "Test" }, thinking: { mode: "fixed", level: "medium" } }]);
-    store.close();
-  });
-
-  it("surfaces unexpected store failures instead of mislabeling them as conflicts", () => {
-    const store = new AutomationStore(":memory:");
-    vi.spyOn(store, "insertDefinition").mockImplementation(() => { throw new Error("disk I/O failed"); });
-    const service = new AutomationService(store, new PendingRunner());
-    const backend = new AutomationBackend(() => service);
-
-    expect(() => backend.request(context(AUTOMATIONS_OPERATIONS.create, { contractVersion: 1, draft: draft() }))).toThrow("disk I/O failed");
-    store.close();
-  });
-
-  it("deletes an unknown-only definition through the scoped API without deleting its history", async () => {
-    const store = new AutomationStore(":memory:");
+    const unused = () => Promise.reject(new Error("unused"));
+    const service = new AutomationService(store, { models: () => [], create: unused, run: unused, snapshot: unused, abort: unused, release: unused });
+    return { store, service, backend: new AutomationBackend(() => service) };
+  }
+  it("reads the host-scoped snapshot and rejects caller scope, version mismatches and invalid limits", async () => {
+    const { store, service, backend } = fixture();
     try {
-      const service = new AutomationService(store, new PendingRunner());
-      const backend = new AutomationBackend(() => service);
-      const automation = service.create({ projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/authoritative" }, draft());
-      const request = context(AUTOMATIONS_OPERATIONS.delete, { contractVersion: 1, automationId: automation.id, expectedRevision: automation.revision });
-      store.createManualRun(automation, "old-run", "2026-01-01T00:00:00.000Z");
-      store.markRunStarting("old-run", "old-attempt", "2026-01-01T00:00:01.000Z");
-      await expect(backend.request(request)).resolves.toMatchObject({ ok: false, error: { code: "conflict", message: "Cannot delete an automation while it has an active run" } });
-      const history = store.finishRun("old-run", { status: "unknown", reason: "daemon_restart", completedAt: "2026-01-01T00:00:02.000Z" });
-
-      await expect(backend.request({ ...request, workspace: { ...request.workspace, id: "other-workspace" } })).resolves.toMatchObject({ ok: false, error: { code: "not-found" } });
-      await expect(backend.request(context(AUTOMATIONS_OPERATIONS.delete, { contractVersion: 1, automationId: automation.id, expectedRevision: 99 }))).resolves.toMatchObject({ ok: false, error: { code: "conflict", message: "Automation was changed by another client" } });
-      expect(store.getDefinition(automation.id)).toBeDefined();
-      await expect(backend.request(request)).resolves.toEqual({ contractVersion: 1, ok: true, value: { deleted: true } });
-      await expect(backend.request(context(AUTOMATIONS_OPERATIONS.snapshot, { contractVersion: 1 }))).resolves.toMatchObject({ ok: true, value: { definitions: [], runs: [history] } });
-      await expect(backend.request(context(AUTOMATIONS_OPERATIONS.runNow, { contractVersion: 1, automationId: automation.id, expectedRevision: automation.revision }))).resolves.toMatchObject({ ok: false, error: { code: "not-found" } });
-    } finally {
-      store.close();
-    }
+      service.create({ projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/authoritative" }, parseDraft(draft));
+      await expect(backend.request(context("snapshot", { contractVersion: 1 }))).resolves.toMatchObject({ ok: true, value: { definitions: [{ workspacePath: "/authoritative" }], runs: [] } });
+      await expect(backend.request({ ...context("snapshot", { contractVersion: 1 }), workspace: { ...context("snapshot", {}).workspace, id: "other" } })).resolves.toMatchObject({ value: { definitions: [] } });
+      for (const input of [{ contractVersion: 1, projectId: "other" }, { contractVersion: 1, limit: 201 }, { contractVersion: 2 }]) {
+        await expect(backend.request(context("snapshot", input))).resolves.toMatchObject({ ok: false });
+      }
+    } finally { store.close(); }
   });
-
-  it("returns stale revision conflicts in-envelope", async () => {
-    const store = new AutomationStore(":memory:");
-    const service = new AutomationService(store, new PendingRunner());
-    const backend = new AutomationBackend(() => service);
-    const created = await backend.request(context(AUTOMATIONS_OPERATIONS.create, { contractVersion: 1, draft: draft() }));
-    const automationId = stringValue(record(record(created)["value"])["id"]);
-    await expect(backend.request(context(AUTOMATIONS_OPERATIONS.delete, { contractVersion: 1, automationId, expectedRevision: 99 }))).resolves.toMatchObject({ ok: false, error: { code: "conflict" } });
-    store.close();
+  it("has no separate mutation implementation; all callers must use shared management", async () => {
+    const { store, backend } = fixture();
+    try {
+      for (const operation of ["create", "update", "delete", "run-now", "cancel-run"]) {
+        await expect(backend.request(context(operation, { contractVersion: 1 }))).resolves.toMatchObject({ ok: false, error: { code: "unknown-operation" } });
+      }
+    } finally { store.close(); }
+  });
+  it("does not disguise unexpected storage failures as domain errors", () => {
+    const { store, service, backend } = fixture();
+    try {
+      vi.spyOn(service, "list").mockImplementation(() => { throw new Error("disk I/O failed"); });
+      expect(() => backend.request(context("snapshot", { contractVersion: 1 }))).toThrow("disk I/O failed");
+    } finally { store.close(); }
+  });
+  it("strictly parses shared draft and patch requirements", () => {
+    expect(parseDraft(draft)).toEqual(draft);
+    expect(parsePatch({ prompt: "changed", description: "" })).toEqual({ prompt: "changed", description: "" });
+    expect(() => parseDraft({ ...draft, cwd: "/evil" })).toThrow("Unexpected input field: cwd");
+    expect(() => parsePatch({ expectedRevision: 1 })).toThrow("Unexpected input field");
   });
 });
-
-function record(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Expected object");
-  return Object.fromEntries(Object.entries(value));
-}
-function stringValue(value: unknown): string {
-  if (typeof value !== "string") throw new Error("Expected string");
-  return value;
-}
-function numberValue(value: unknown): number {
-  if (typeof value !== "number") throw new Error("Expected number");
-  return value;
-}

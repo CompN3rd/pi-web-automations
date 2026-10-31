@@ -6,7 +6,7 @@ Durable, machine-local scheduled Pi jobs with a workspace panel, SQLite history,
 
 ## Next release (development checkout)
 
-The checkout now requires the published PI WEB **1.202610.9+** and Pi coding agent **1.4.0+** (within their current major ranges). Server management uses API v5 and the host's companion backend transport; the browser panel is still API v4 while its modernization is in progress. SQLite is runtime-provided through Node 22.19+, with no native SQLite dependency. This work is not yet published; the 0.1.2 compatibility statement above and release notes describe the previous release.
+The checkout now requires the published PI WEB **1.202610.9+** and Pi coding agent **1.4.0+** (within their current major ranges). Browser and server entries use API v5 and share management operations through the host's scoped backend transport. SQLite is runtime-provided through Node 22.19+, with no native SQLite dependency. This work is not yet published; the 0.1.2 compatibility statement above and release notes describe the previous release.
 
 ## Updated in 0.1.2
 
@@ -30,6 +30,8 @@ Version `0.1.1` fixes the packaging by bundling the public host capability helpe
 For source development, run `npm ci && npm run verify` in a checkout, then install the built directory as a local Pi package instead of the npm package. See the [0.1.2 release notes](docs/releases/0.1.2.md) for current compatibility and update guidance, the [0.1.1 release notes](docs/releases/0.1.1.md) for the retained packaging fix, and the [0.1.0 release notes](docs/releases/0.1.0.md) for initial features and operating limitations.
 
 Fixed provider/model IDs are entered manually and validated by the companion at test/run. No silent fallback is used. Sessions are visible, user-owned conversations—not exclusively leased background runtimes. Unconfirmed execution blocks the definition, including after edits and restarts; inspect Sessions before creating a replacement.
+
+In the Automations editor, **Target workspace** lists registered projects/workspaces on the selected machine, including workspaces with no saved automations. New drafts default to the currently selected workspace; choosing another target sends both exact IDs and the backend revalidates them before saving. After creating elsewhere, open that workspace's Automations panel to test and enable it. Editing a saved automation preserves its original target. Catalog failures are shown explicitly and never substitute gateway projects or guessed paths.
 
 The Automations panel includes session links on definition cards (latest session in loaded history) and run rows, plus a continuous duration-block timeline with time flowing top to bottom and one column per automation across the horizontal axis. Runs on different days stay in the same column, and concurrent jobs align on the shared time axis. Colors are stable per automation; overlapping runs within one automation appear side by side, and very short runs retain a minimum visible size. Hover or focus blocks for details, or click linked blocks to open their sessions. The timeline shows the latest 200 workspace runs. Each definition's estimated total and average cost cover **all retained runs**, independently of that limit; averages exclude runs without cost data and include known zero-cost runs. Coverage counts are shown because usage can be missing or partial, not a complete billing total.
 

@@ -1,5 +1,6 @@
-import type { JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+import type { JsonValue, WorkspacePanelContextV5 } from "@jmfederico/pi-web/plugin-api";
 import { describe, expect, it, vi } from "vitest";
+import { catalogFixture, managementSuccess } from "./browser-test-fixtures.js";
 import {
   ACTIVE_POLL_INTERVAL_MS,
   IDLE_POLL_INTERVAL_MS,
@@ -35,12 +36,14 @@ function success(value: unknown): JsonValue {
 
 function context(request: (operation: string, input: JsonValue) => Promise<JsonValue>, machineId = "local", workspaceId = "workspace-1") {
   const requestRender = vi.fn();
-  const value: WorkspacePanelContext = {
+  const value: WorkspacePanelContextV5 = {
     navigate: vi.fn(() => Promise.resolve()),
     machine: { id: machineId, name: machineId, kind: "local" },
     workspace: { id: workspaceId, projectId: "project-1", path: "/repo", label: workspaceId, isMain: true },
     files: fileMethods(),
     peer: { request },
+    catalog: catalogFixture(machineId),
+    backend: { machineId, forScope: () => ({ request }) },
     host: { requestRender },
     prompt: { insertText() { return undefined; }, getText: () => "", getSelection: () => null },
     terminal: { open() { return undefined; }, runCommand: () => Promise.reject(new Error("not used")) },
@@ -128,14 +131,12 @@ describe("AutomationsController", () => {
     expect(controller.state(newTarget.value).snapshot?.runs).toEqual([]);
   });
 
-  it("uses exact scoped backend envelopes for create, edit, run, enable, delete, and cancel", async () => {
+  it("uses shared management with exact target, revision and cancellation identity for every mutation", async () => {
     const calls: [string, JsonValue][] = [];
     const backend = vi.fn((operation: string, input: JsonValue): Promise<JsonValue> => {
       calls.push([operation, input]);
       if (operation === AUTOMATIONS_OPERATIONS.snapshot) return Promise.resolve(success(snapshot()));
-      if (operation === AUTOMATIONS_OPERATIONS.delete) return Promise.resolve(success({ deleted: true }));
-      if (operation === AUTOMATIONS_OPERATIONS.runNow || operation === AUTOMATIONS_OPERATIONS.cancelRun) return Promise.resolve(success(run));
-      return Promise.resolve(success(definition));
+      return Promise.resolve(managementSuccess);
     });
     const target = context(backend);
     const controller = new AutomationsController(timerFixture().api);
@@ -154,12 +155,14 @@ describe("AutomationsController", () => {
     await controller.cancelRun(target.value, run);
 
     const mutations = calls.filter(([operation]) => operation !== AUTOMATIONS_OPERATIONS.snapshot);
-    expect(mutations.map(([operation]) => operation)).toEqual(["create", "update", "run-now", "update", "delete", "cancel-run"]);
-    expect(mutations[0]?.[1]).toEqual({ contractVersion: 1, draft: { name: "New", prompt: "Do it", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" }, timeoutMs: 600_000 } });
-    expect(mutations[1]?.[1]).toMatchObject({ contractVersion: 1, automationId: "automation-1", expectedRevision: 1, patch: { description: "", prompt: "Changed" } });
-    for (const [, input] of mutations) {
-      expect(JSON.stringify(input)).not.toMatch(/projectId|workspaceId|workspacePath|machine|cwd/u);
-    }
+    expect(mutations.map(([operation]) => operation)).toEqual(Array<string>(6).fill("manage"));
+    expect(mutations[0]?.[1]).toEqual({ action: "create", projectId: "project-1", workspaceId: "workspace-1", draft: { name: "New", prompt: "Do it", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" }, timeoutMs: 600_000 } });
+    expect(mutations[1]?.[1]).toMatchObject({ action: "update", automationId: "automation-1", expectedRevision: 1, patch: { description: "", prompt: "Changed" } });
+    expect(mutations[2]?.[1]).toEqual({ action: "run", automationId: "automation-1", expectedRevision: 1 });
+    expect(mutations[3]?.[1]).toEqual({ action: "enable", automationId: "automation-1", expectedRevision: 1 });
+    expect(mutations[4]?.[1]).toEqual({ action: "delete", automationId: "automation-1", expectedRevision: 1 });
+    expect(mutations[5]?.[1]).toEqual({ action: "cancel", automationId: "automation-1", runId: "run-1" });
+    for (const [, input] of mutations) expect(JSON.stringify(input)).not.toMatch(/workspacePath|machine|cwd/u);
     expect(target.requestRender).toHaveBeenCalled();
   });
 
@@ -168,7 +171,7 @@ describe("AutomationsController", () => {
     let snapshotCalls = 0;
     const updated = { ...definition, name: "Updated" };
     const backend = vi.fn((operation: string): Promise<JsonValue> => {
-      if (operation === AUTOMATIONS_OPERATIONS.runNow) return Promise.resolve(success(run));
+      if (operation === "manage") return Promise.resolve(managementSuccess);
       snapshotCalls += 1;
       if (snapshotCalls === 1) return Promise.resolve(success(snapshot()));
       if (snapshotCalls === 2) return new Promise((resolve) => { resolveStale = resolve; });
@@ -210,6 +213,56 @@ describe("AutomationsController", () => {
     expect(controller.state(malformedTarget.value).error).toContain("Invalid Automations backend response");
   });
 
+  it("discovers empty targets and sends both selected exact IDs on the captured machine backend", async () => {
+    const backend = vi.fn((operation: string) => Promise.resolve(operation === "snapshot" ? success(snapshot()) : managementSuccess));
+    const target = context(backend, "remote-1");
+    const forScope = vi.spyOn(target.value.backend ?? { forScope: () => ({}) }, "forScope");
+    const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value); await controller.refresh(target.value);
+    controller.beginCreate(target.value); await controller.discoverTargets(target.value);
+    const empty = controller.state(target.value).targets?.find((item) => item.workspaceId === "workspace-empty");
+    expect(empty?.projectId).toBe("project-empty");
+    expect(empty?.label).toContain("Empty workspace");
+    controller.updateEditor(target.value, { name: "Empty target job", prompt: "Work", projectId: "project-empty", workspaceId: "workspace-empty" });
+    await controller.saveEditor(target.value);
+    expect(forScope).toHaveBeenCalledWith({ kind: "workspace", projectId: "project-1", workspaceId: "workspace-1" });
+    expect(backend).toHaveBeenCalledWith("manage", expect.objectContaining({ action: "create", projectId: "project-empty", workspaceId: "workspace-empty" }));
+    expect(controller.state(target.value).notice).toContain("workspace-empty");
+    expect(controller.state(target.value).editor).toBeUndefined();
+    controller.disconnect(target.value);
+  });
+
+  it("discards obsolete discovery and reports catalog failures without guessing another target", async () => {
+    const target = context(() => Promise.resolve(success(snapshot())));
+    let release: ((value: []) => void) | undefined;
+    vi.spyOn(target.value.catalog.projects, "list").mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value);
+    const pending = controller.discoverTargets(target.value);
+    controller.disconnect(target.value);
+    release?.([]); await pending;
+    expect(controller.state(target.value).targets).toBeUndefined();
+    const failed = context(() => Promise.resolve(success(snapshot())), "remote-2");
+    vi.spyOn(failed.value.catalog.projects, "list").mockRejectedValue(new Error("Remote catalog unavailable"));
+    controller.connect(failed.value); controller.beginCreate(failed.value);
+    await controller.discoverTargets(failed.value);
+    expect(controller.state(failed.value).targetError).toContain("Remote catalog unavailable");
+    expect(controller.state(failed.value).editor).toMatchObject({ projectId: "project-1", workspaceId: "workspace-1" });
+    controller.disconnect(failed.value);
+  });
+
+  it("retains the editor on a rejected management mutation and does not retry it", async () => {
+    const backend = vi.fn((operation: string) => operation === "snapshot" ? Promise.resolve(success(snapshot())) : Promise.reject(new Error("Target revoked")));
+    const target = context(backend);
+    const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value); await controller.refresh(target.value);
+    controller.beginCreate(target.value); await controller.saveEditor(target.value);
+    expect(controller.state(target.value).editor).toBeDefined();
+    expect(controller.state(target.value).error).toBe("Target revoked");
+    expect(backend.mock.calls.filter(([operation]) => operation === "manage")).toHaveLength(1);
+    controller.disconnect(target.value);
+  });
+
   it("filters thinking levels to the selected model", () => {
     expect(availableThinkingLevels(snapshot(), { mode: "fixed", provider: "anthropic", id: "sonnet" })).toEqual(["low", "high"]);
     expect(availableThinkingLevels(snapshot(), { mode: "fixed", provider: "other", id: "missing" })).toEqual(["off", "low", "high"]);
@@ -249,7 +302,7 @@ function json(value: unknown): JsonValue {
   throw new Error("not JSON");
 }
 
-function fileMethods(): WorkspacePanelContext["files"] {
+function fileMethods(): WorkspacePanelContextV5["files"] {
   const unused = (): Promise<never> => Promise.reject(new Error("not used"));
   return { readFile: unused, listFiles: unused, writeFile: unused, deleteFile: unused, moveFile: unused };
 }

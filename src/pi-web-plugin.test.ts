@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 
-import type { JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+import type { JsonValue, WorkspacePanelContextV5 } from "@jmfederico/pi-web/plugin-api";
 import { html, render, svg } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin from "./browser/pi-web-plugin.js";
+import { catalogFixture, managementSuccess } from "./browser-test-fixtures.js";
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -13,7 +14,7 @@ afterEach(() => {
 
 describe("standalone Automations browser plugin", () => {
   it("renders session links, colored timeline blocks and all-history cost statistics", async () => {
-    const activation = plugin.activate({ apiVersion: 4, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
     const panel = activation.contributions.workspacePanels?.[0];
     if (!panel) throw new Error("Expected Automations panel");
     const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue({
@@ -50,7 +51,7 @@ describe("standalone Automations browser plugin", () => {
   });
 
   it("groups days in automation columns and aligns simultaneous runs vertically", async () => {
-    const activation = plugin.activate({ apiVersion: 4, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
     const panel = activation.contributions.workspacePanels?.[0];
     if (!panel) throw new Error("Expected Automations panel");
     const base = {
@@ -90,12 +91,10 @@ describe("standalone Automations browser plugin", () => {
   });
 
   it("saves manually entered fixed model identifiers without resetting fixed thinking", async () => {
-    const activation = plugin.activate({ apiVersion: 4, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
     const panel = activation.contributions.workspacePanels?.[0];
     if (!panel) throw new Error("Expected Automations panel");
-    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockImplementation((operation) => Promise.resolve(operation === "create" ? {
-      contractVersion: 1, ok: true, value: fixedDefinition(),
-    } : successSnapshot()));
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockImplementation((operation) => Promise.resolve(operation === "manage" ? managementSuccess : successSnapshot()));
     const context = panelContext(backend);
     const container = document.createElement("div"); document.body.append(container);
     const redraw = async () => { await settle(); render(panel.render(context), container); };
@@ -110,6 +109,7 @@ describe("standalone Automations browser plugin", () => {
       await redraw(); await redraw();
       [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "New automation")?.click();
       await redraw();
+      await change("Target workspace", JSON.stringify(["project-empty", "workspace-empty"]));
       await change("Name", "Fixed job"); await change("Prompt", "Review");
       await change("Thinking", "fixed:high"); await change("Model policy", "fixed");
       await change("Provider", "evaluation"); await change("Model id", "fixed");
@@ -117,15 +117,15 @@ describe("standalone Automations browser plugin", () => {
       expect(thinking?.value).toBe("fixed:high");
       container.querySelector<HTMLFormElement>("form")?.requestSubmit();
       await redraw();
-      const submitted = backend.mock.calls.find(([operation]) => operation === "create")?.[1];
+      const submitted = backend.mock.calls.find(([operation]) => operation === "manage")?.[1];
       expect(submitted).toMatchObject({
-        contractVersion: 1,
+        action: "create", projectId: "project-empty", workspaceId: "workspace-empty",
         draft: { name: "Fixed job", prompt: "Review", model: { mode: "fixed", provider: "evaluation", id: "fixed" }, thinking: { mode: "fixed", level: "high" } },
       });
     } finally { render(null, container); }
   });
   it("marks saved fixed thinking as selected when mounting an existing definition editor", async () => {
-    const activation = plugin.activate({ apiVersion: 4, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
     const panel = activation.contributions.workspacePanels?.[0];
     if (!panel) throw new Error("Expected Automations panel");
     const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue(successSnapshot([fixedDefinition()]));
@@ -146,7 +146,7 @@ describe("standalone Automations browser plugin", () => {
     } finally { render(null, container); }
   });
   it("shows its workspace panel only with a paired backend and requests host renders", async () => {
-    const contributions = (plugin.activate({ apiVersion: 4, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal })).contributions;
+    const contributions = (plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal })).contributions;
     const panel = contributions.workspacePanels?.[0];
     if (panel === undefined) throw new Error("Expected Automations panel");
     const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue(successSnapshot());
@@ -175,14 +175,15 @@ describe("standalone Automations browser plugin", () => {
   });
 });
 
-function panelContext(request: ((operation: string, input: JsonValue) => Promise<JsonValue>) | undefined, requestRender = vi.fn()): WorkspacePanelContext {
+function panelContext(request: ((operation: string, input: JsonValue) => Promise<JsonValue>) | undefined, requestRender = vi.fn()): WorkspacePanelContextV5 {
   const unused = (): Promise<never> => Promise.reject(new Error("not used"));
   return {
     navigate: vi.fn(() => Promise.resolve()),
     machine: { id: "local", name: "Local", kind: "local" },
     workspace: { id: "workspace-1", projectId: "project-1", path: "/repo", label: "main", isMain: true },
     files: { readFile: unused, listFiles: unused, writeFile: unused, deleteFile: unused, moveFile: unused },
-    ...(request === undefined ? {} : { peer: { request } }),
+    catalog: catalogFixture(),
+    ...(request === undefined ? {} : { peer: { request }, backend: { machineId: "local", forScope: () => ({ request }) } }),
     host: { requestRender },
     prompt: { insertText() { return undefined; }, getText: () => "", getSelection: () => null },
     terminal: { open() { return undefined; }, runCommand: unused },

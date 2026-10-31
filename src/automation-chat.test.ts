@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { mkdtempSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,8 +79,9 @@ async function fixture(machineId: string, execution = false) {
     if (execution && selection.sessionId === `task-${machineId}` && selection.workspaceId === "a-other") return Promise.resolve(taskConnection);
     throw new Error("Management must not connect to a session bus");
   });
+  let seeding = true;
   const resolve = vi.fn((scope: { projectId: string; workspaceId: string }) => {
-    if (scope.workspaceId === "inaccessible" || scope.projectId !== `p-${scope.workspaceId}`) throw new Error("Not accessible");
+    if ((!seeding && scope.workspaceId === "inaccessible") || scope.projectId !== `p-${scope.workspaceId}`) throw new Error("Not accessible");
     return Promise.resolve(authority(scope.workspaceId));
   });
   const targetIds = ["a-other", "z-current", "empty-other", "inaccessible"];
@@ -103,9 +103,10 @@ async function fixture(machineId: string, execution = false) {
   };
   const saved = [];
   for (const id of ["a-other", "z-current", "inaccessible"]) {
-    const response = await request(id, "create", { contractVersion: 1, draft: { name: `${machineId}-${id}`, prompt: `Saved prompt ${machineId}-${id}`, trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" }, timeoutMs: 60000 } });
-    saved.push(chatRecord(chatRecord(response)["value"]));
+    const response = await request(id, "manage", { action: "create", draft: { name: `${machineId}-${id}`, prompt: `Saved prompt ${machineId}-${id}`, trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" }, timeoutMs: 60000 } });
+    saved.push(chatRecord(chatRecord(response)["definition"]));
   }
+  seeding = false;
   const query = async (params: unknown, signal = new AbortController().signal) => {
     if (!execute) throw new Error("Tool not registered");
     const result = await execute(["call", params, signal, undefined, { cwd }]);
@@ -137,12 +138,6 @@ async function fixture(machineId: string, execution = false) {
     setCwd: (value: string) => { cwd = value; },
     unavailable: () => { available = false; },
     fixtureStore: () => { const store = new AutomationStore(join(root, "automations.sqlite")); cleanups.push(() => { store.close(); }); return store; } };
-}
-
-function expectSaveError(value: unknown, message: string) {
-  const response = chatRecord(value);
-  expect(response["ok"]).toBe(false);
-  expect(chatRecord(response["error"])["message"]).toContain(message);
 }
 
 async function settle() { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }
@@ -317,7 +312,7 @@ describe("host companion backend management boundary", () => {
     expect(chatRecord(updated["definition"])).not.toHaveProperty("testedRevision");
     expect(chatRecord(updated["definition"])).not.toHaveProperty("description");
     await expect(f.query(edit)).rejects.toThrow("changed by another client");
-    expectSaveError(await f.request("a-other", "update", { contractVersion: 1, automationId: targetId, expectedRevision: 2, patch: { enabled: true } }), "successfully before enabling");
+    await expect(f.request("a-other", "manage", { action: "enable", automationId: targetId, expectedRevision: 2 })).rejects.toThrow("successfully before enabling");
     expect(store.getDefinition(targetId)).toMatchObject({ revision: 2, enabled: false });
     expect(store.listRuns("p-a-other", "a-other")).toEqual([]);
   });
@@ -378,8 +373,8 @@ describe("host companion backend management boundary", () => {
     await expect(f.query({ action: "enable", automationId: id, expectedRevision: 2 })).rejects.toThrow("unconfirmed work");
     expect((await f.query({ action: "cancel", automationId: id, runId: run.id }))["details"]).toMatchObject({ run: { status: "unknown", attempt: { forceStopped: false } } });
     expect((await f.query({ action: "pause", automationId: id, expectedRevision: 2 }))["details"]).toMatchObject({ definition: { enabled: false } });
-    expectSaveError(await f.request("a-other", "run-now", { contractVersion: 1, automationId: id, expectedRevision: 2 }), "unconfirmed work");
-    expectSaveError(await f.request("a-other", "update", { contractVersion: 1, automationId: id, expectedRevision: 2, patch: { enabled: true } }), "unconfirmed work");
+    await expect(f.request("a-other", "manage", { action: "run", automationId: id, expectedRevision: 2 })).rejects.toThrow("unconfirmed work");
+    await expect(f.request("a-other", "manage", { action: "enable", automationId: id, expectedRevision: 2 })).rejects.toThrow("unconfirmed work");
   });
 
   it("fails closed when the host backend is unavailable, without another store or session fallback", async () => {

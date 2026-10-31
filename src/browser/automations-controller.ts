@@ -1,10 +1,8 @@
-import type { JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+import type { JsonValue, WorkspacePanelContextV5 } from "@jmfederico/pi-web/plugin-api";
 import {
   AUTOMATIONS_CONTRACT_VERSION,
   AUTOMATIONS_OPERATIONS,
-  parseAutomationDefinition,
   parseAutomationEnvelope,
-  parseAutomationRun,
   parseAutomationSnapshot,
   type AutomationDefinition,
   type AutomationDraft,
@@ -27,7 +25,15 @@ export interface TimerApi {
   clearTimeout(handle: TimerHandle): void;
 }
 
+export interface AutomationTarget {
+  projectId: string;
+  workspaceId: string;
+  label: string;
+}
+
 export interface AutomationEditor {
+  projectId: string;
+  workspaceId: string;
   automationId?: string;
   expectedRevision?: number;
   name: string;
@@ -40,13 +46,16 @@ export interface AutomationEditor {
 }
 
 export interface AutomationPanelState {
-  context: WorkspacePanelContext;
+  context: WorkspacePanelContextV5;
   snapshot?: AutomationSnapshot;
   loading: boolean;
   mutating: boolean;
   error: string | undefined;
   notice: string | undefined;
   editor?: AutomationEditor;
+  targets?: AutomationTarget[];
+  targetError?: string;
+  targetSequence: number;
   retained: boolean;
   requestSequence: number;
   request: Promise<void> | undefined;
@@ -65,11 +74,11 @@ export class AutomationsController {
 
   constructor(private readonly timers: TimerApi = browserTimers) {}
 
-  state(context: WorkspacePanelContext): AutomationPanelState {
+  state(context: WorkspacePanelContextV5): AutomationPanelState {
     return this.stateFor(context);
   }
 
-  connect(context: WorkspacePanelContext, visible = true): void {
+  connect(context: WorkspacePanelContextV5, visible = true): void {
     const key = contextKey(context);
     const changed = this.connectedKey !== key;
     if (changed) {
@@ -82,25 +91,25 @@ export class AutomationsController {
     if (visible && state.request === undefined && (changed || state.snapshot === undefined)) void this.refresh(context);
   }
 
-  disconnect(context: WorkspacePanelContext): void {
+  disconnect(context: WorkspacePanelContextV5): void {
     if (this.connectedKey !== contextKey(context)) return;
     this.invalidateConnectedRequest();
     this.connectedKey = undefined;
     this.clearTimer();
   }
 
-  visibilityChanged(context: WorkspacePanelContext, visible: boolean): void {
+  visibilityChanged(context: WorkspacePanelContextV5, visible: boolean): void {
     if (this.connectedKey !== contextKey(context)) return;
     this.visible = visible;
     this.clearTimer();
     if (visible) void this.refresh(context);
   }
 
-  invalidate(context: WorkspacePanelContext): Promise<void> {
+  invalidate(context: WorkspacePanelContextV5): Promise<void> {
     return this.refresh(context);
   }
 
-  refresh(context: WorkspacePanelContext): Promise<void> {
+  refresh(context: WorkspacePanelContextV5): Promise<void> {
     const state = this.stateFor(context);
     if (state.request !== undefined) return state.request;
     const sequence = state.requestSequence + 1;
@@ -127,20 +136,44 @@ export class AutomationsController {
     return request;
   }
 
-  beginCreate(context: WorkspacePanelContext): void {
+  beginCreate(context: WorkspacePanelContextV5): void {
     const state = this.stateFor(context);
     const snapshot = state.snapshot;
     state.editor = {
+      projectId: context.workspace.projectId, workspaceId: context.workspace.id,
       name: "", description: "", prompt: "", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" },
       timeoutMs: snapshot?.defaultTimeoutMs ?? 3_600_000,
     };
     state.error = undefined;
     this.render(state);
+    void this.discoverTargets(context);
   }
 
-  beginEdit(context: WorkspacePanelContext, definition: AutomationDefinition): void {
+  async discoverTargets(context: WorkspacePanelContextV5): Promise<void> {
+    const state = this.stateFor(context);
+    const sequence = ++state.targetSequence;
+    try {
+      const targets: AutomationTarget[] = [];
+      for (const project of await context.catalog.projects.list()) {
+        for (const workspace of await context.catalog.workspaces.list(project.id)) {
+          targets.push({ projectId: project.id, workspaceId: workspace.id, label: `${project.name} / ${workspace.label} (${project.id} / ${workspace.id})` });
+        }
+      }
+      if (!state.retained || state.targetSequence !== sequence || this.connectedKey !== contextKey(context)) return;
+      state.targets = targets;
+      delete state.targetError;
+    } catch (error) {
+      if (!state.retained || state.targetSequence !== sequence || this.connectedKey !== contextKey(context)) return;
+      delete state.targets;
+      state.targetError = `Target discovery failed: ${errorMessage(error)}`;
+    }
+    this.render(state);
+  }
+
+  beginEdit(context: WorkspacePanelContextV5, definition: AutomationDefinition): void {
     const state = this.stateFor(context);
     state.editor = {
+      projectId: definition.projectId, workspaceId: definition.workspaceId,
       automationId: definition.id,
       expectedRevision: definition.revision,
       name: definition.name,
@@ -155,70 +188,73 @@ export class AutomationsController {
     this.render(state);
   }
 
-  cancelEdit(context: WorkspacePanelContext): void {
+  cancelEdit(context: WorkspacePanelContextV5): void {
     const state = this.stateFor(context);
     delete state.editor;
     this.render(state);
   }
 
-  updateEditor(context: WorkspacePanelContext, patch: Partial<AutomationEditor>): void {
+  updateEditor(context: WorkspacePanelContextV5, patch: Partial<AutomationEditor>): void {
     const state = this.stateFor(context);
     if (state.editor === undefined) return;
     state.editor = { ...state.editor, ...patch };
     this.render(state);
   }
 
-  async saveEditor(context: WorkspacePanelContext): Promise<void> {
+  async saveEditor(context: WorkspacePanelContextV5): Promise<void> {
     const state = this.stateFor(context);
     const editor = state.editor;
     if (editor === undefined) return;
     if (editor.automationId === undefined) {
       const draft: AutomationDraft = editorDraft(editor);
-      await this.mutate(context, AUTOMATIONS_OPERATIONS.create, { contractVersion: AUTOMATIONS_CONTRACT_VERSION, draft: json(draft) }, parseAutomationDefinition, "Automation draft created");
+      await this.mutate(context, { action: "create", projectId: editor.projectId, workspaceId: editor.workspaceId, draft: json(draft) },
+        `Automation draft created in project ${editor.projectId}, workspace ${editor.workspaceId}. Open that workspace to test and enable it.`);
     } else {
       const patch: AutomationPatch = { ...editorDraft(editor), description: editor.description };
-      await this.mutate(context, AUTOMATIONS_OPERATIONS.update, {
-        contractVersion: AUTOMATIONS_CONTRACT_VERSION,
+      await this.mutate(context, {
+        action: "update",
         automationId: editor.automationId,
         expectedRevision: editor.expectedRevision ?? 0,
         patch: json(patch),
-      }, parseAutomationDefinition, "Automation saved; run it successfully before enabling");
+      }, "Automation saved; run it successfully before enabling");
     }
     if (state.error === undefined) delete state.editor;
   }
 
-  runNow(context: WorkspacePanelContext, definition: AutomationDefinition): Promise<void> {
-    return this.mutate(context, AUTOMATIONS_OPERATIONS.runNow, {
-      contractVersion: AUTOMATIONS_CONTRACT_VERSION, automationId: definition.id, expectedRevision: definition.revision,
-    }, parseAutomationRun, "Automation queued");
+  runNow(context: WorkspacePanelContextV5, definition: AutomationDefinition): Promise<void> {
+    return this.mutate(context, {
+      action: "run", automationId: definition.id, expectedRevision: definition.revision,
+    }, "Automation queued");
   }
 
-  setEnabled(context: WorkspacePanelContext, definition: AutomationDefinition, enabled: boolean): Promise<void> {
-    return this.mutate(context, AUTOMATIONS_OPERATIONS.update, {
-      contractVersion: AUTOMATIONS_CONTRACT_VERSION, automationId: definition.id, expectedRevision: definition.revision, patch: { enabled },
-    }, parseAutomationDefinition, enabled ? "Automation enabled" : "Automation paused");
+  setEnabled(context: WorkspacePanelContextV5, definition: AutomationDefinition, enabled: boolean): Promise<void> {
+    return this.mutate(context, {
+      action: enabled ? "enable" : "pause", automationId: definition.id, expectedRevision: definition.revision,
+    }, enabled ? "Automation enabled" : "Automation paused");
   }
 
-  delete(context: WorkspacePanelContext, definition: AutomationDefinition): Promise<void> {
-    return this.mutate(context, AUTOMATIONS_OPERATIONS.delete, {
-      contractVersion: AUTOMATIONS_CONTRACT_VERSION, automationId: definition.id, expectedRevision: definition.revision,
-    }, parseDeleted, "Automation deleted");
+  delete(context: WorkspacePanelContextV5, definition: AutomationDefinition): Promise<void> {
+    return this.mutate(context, {
+      action: "delete", automationId: definition.id, expectedRevision: definition.revision,
+    }, "Automation deleted");
   }
 
-  cancelRun(context: WorkspacePanelContext, run: AutomationRun): Promise<void> {
-    return this.mutate(context, AUTOMATIONS_OPERATIONS.cancelRun, {
-      contractVersion: AUTOMATIONS_CONTRACT_VERSION, runId: run.id,
-    }, parseAutomationRun, "Cancellation requested");
+  cancelRun(context: WorkspacePanelContextV5, run: AutomationRun): Promise<void> {
+    return this.mutate(context, {
+      action: "cancel", automationId: run.automationId, runId: run.id,
+    }, "Cancellation requested; inspect for settlement");
   }
 
-  private async mutate(context: WorkspacePanelContext, operation: string, input: JsonValue, parser: (value: unknown) => unknown, notice: string): Promise<void> {
+  private async mutate(context: WorkspacePanelContextV5, input: JsonValue, notice: string): Promise<void> {
     const state = this.stateFor(context);
     state.mutating = true;
     state.error = undefined;
     state.notice = undefined;
     this.render(state);
     try {
-      await this.request(context, operation, input, parser);
+      const peer = context.backend?.forScope({ kind: "workspace", projectId: context.workspace.projectId, workspaceId: context.workspace.id });
+      if (peer?.request === undefined) throw new Error("Automations backend is unavailable on this machine");
+      parseManagementResult(await peer.request("manage", input));
       if (this.connectedKey !== contextKey(context)) return;
       state.notice = notice;
       this.clearTimer();
@@ -232,14 +268,14 @@ export class AutomationsController {
     }
   }
 
-  private async request<T>(context: WorkspacePanelContext, operation: string, input: JsonValue, parser: (value: unknown) => T): Promise<T> {
+  private async request<T>(context: WorkspacePanelContextV5, operation: string, input: JsonValue, parser: (value: unknown) => T): Promise<T> {
     if (context.peer?.request === undefined) throw new Error("Automations backend is unavailable on this machine");
     const envelope = parseAutomationEnvelope(await context.peer.request(operation, input));
     if (!envelope.ok) throw new AutomationDomainError(envelope.error.code, envelope.error.message);
     return parser(envelope.value);
   }
 
-  private schedule(context: WorkspacePanelContext, state: AutomationPanelState): void {
+  private schedule(context: WorkspacePanelContextV5, state: AutomationPanelState): void {
     this.clearTimer();
     if (!this.visible || this.connectedKey !== contextKey(context)) return;
     const delay = hasActiveRuns(state.snapshot) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
@@ -249,7 +285,7 @@ export class AutomationsController {
     }, delay);
   }
 
-  private accepts(state: AutomationPanelState, context: WorkspacePanelContext, sequence: number): boolean {
+  private accepts(state: AutomationPanelState, context: WorkspacePanelContextV5, sequence: number): boolean {
     return state.retained && state.requestSequence === sequence && this.connectedKey === contextKey(context);
   }
 
@@ -261,10 +297,11 @@ export class AutomationsController {
 
   private detachRequest(state: AutomationPanelState): void {
     state.requestSequence += 1;
+    state.targetSequence += 1;
     state.request = undefined;
   }
 
-  private stateFor(context: WorkspacePanelContext): AutomationPanelState {
+  private stateFor(context: WorkspacePanelContextV5): AutomationPanelState {
     const key = contextKey(context);
     const existing = this.states.get(key);
     if (existing !== undefined) {
@@ -281,7 +318,7 @@ export class AutomationsController {
         this.states.delete(oldest);
       }
     }
-    const created: AutomationPanelState = { context, loading: false, mutating: false, error: undefined, notice: undefined, retained: true, requestSequence: 0, request: undefined };
+    const created: AutomationPanelState = { context, loading: false, mutating: false, error: undefined, notice: undefined, targetSequence: 0, retained: true, requestSequence: 0, request: undefined };
     this.states.set(key, created);
     return created;
   }
@@ -322,7 +359,7 @@ function editorDraft(editor: AutomationEditor): AutomationDraft {
   };
 }
 
-function contextKey(context: WorkspacePanelContext): string {
+function contextKey(context: WorkspacePanelContextV5): string {
   return `${context.machine.id}\u0000${context.workspace.projectId}\u0000${context.workspace.id}`;
 }
 
@@ -341,9 +378,10 @@ function json(value: unknown): JsonValue {
   throw new Error("Automations input is not JSON-compatible");
 }
 
-function parseDeleted(value: unknown): true {
-  if (typeof value !== "object" || value === null || Array.isArray(value) || !("deleted" in value) || value.deleted !== true) throw new Error("Invalid Automations delete response");
-  return true;
+function parseManagementResult(value: unknown): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)
+    || !("machine" in value) || !("project" in value) || !("workspace" in value)
+    || !("message" in value) || typeof value.message !== "string") throw new Error("Invalid Automations management response");
 }
 
 function errorMessage(error: unknown): string {

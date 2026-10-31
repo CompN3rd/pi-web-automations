@@ -6,7 +6,7 @@ import {
   type AutomationPatch,
 } from "../browser/contracts.js";
 import { AutomationService, AutomationServiceError } from "./automation-service.js";
-import type { AutomationScope, UpdateAutomationRequest } from "./contracts.js";
+import type { AutomationScope } from "./contracts.js";
 
 export class AutomationBackend {
   constructor(private readonly service: () => AutomationService | undefined) {}
@@ -42,45 +42,6 @@ function dispatch(service: AutomationService, context: ServerPluginPeerRequestCo
         ...service.models(),
         generatedAt: new Date().toISOString(),
       };
-    }
-    case AUTOMATIONS_OPERATIONS.create: {
-      const input = recordWithKeys(context.input, ["contractVersion", "draft"]);
-      requireVersion(input);
-      return service.create(scope, parseDraft(input["draft"]));
-    }
-    case AUTOMATIONS_OPERATIONS.update: {
-      const input = recordWithKeys(context.input, ["contractVersion", "automationId", "expectedRevision", "patch"]);
-      requireVersion(input);
-      const request: UpdateAutomationRequest = {
-        ...scope,
-        expectedRevision: integer(input["expectedRevision"], "expectedRevision", 1),
-        ...parsePatch(input["patch"]),
-      };
-      return service.update(nonEmptyString(input["automationId"], "automationId"), request);
-    }
-    case AUTOMATIONS_OPERATIONS.delete: {
-      const input = recordWithKeys(context.input, ["contractVersion", "automationId", "expectedRevision"]);
-      requireVersion(input);
-      service.delete(
-        nonEmptyString(input["automationId"], "automationId"),
-        scope,
-        integer(input["expectedRevision"], "expectedRevision", 1),
-      );
-      return { deleted: true };
-    }
-    case AUTOMATIONS_OPERATIONS.runNow: {
-      const input = recordWithKeys(context.input, ["contractVersion", "automationId", "expectedRevision"]);
-      requireVersion(input);
-      return service.runNow(
-        nonEmptyString(input["automationId"], "automationId"),
-        scope,
-        integer(input["expectedRevision"], "expectedRevision", 1),
-      );
-    }
-    case AUTOMATIONS_OPERATIONS.cancelRun: {
-      const input = recordWithKeys(context.input, ["contractVersion", "runId"]);
-      requireVersion(input);
-      return service.cancel(nonEmptyString(input["runId"], "runId"), scope);
     }
     default:
       throw new AutomationInputError("unknown-operation", `Unknown Automations operation: ${context.operation}`);
@@ -178,11 +139,6 @@ function requireKeys(record: Record<string, unknown>, allowed: readonly string[]
 function stringValue(value: unknown, field: string): string {
   if (typeof value !== "string") throw new AutomationInputError("invalid-input", `${field} must be a string`);
   return value;
-}
-function nonEmptyString(value: unknown, field: string): string {
-  const result = stringValue(value, field).trim();
-  if (result === "") throw new AutomationInputError("invalid-input", `${field} is required`);
-  return result;
 }
 function integer(value: unknown, field: string, minimum: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) throw new AutomationInputError("invalid-input", `${field} must be an integer between ${String(minimum)} and ${String(maximum)}`);

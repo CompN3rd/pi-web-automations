@@ -1,9 +1,9 @@
 import type {
   HtmlTemplateTag,
-  PluginContributions,
+  PluginContributionsV5,
   SvgTemplateTag,
-  WorkspacePanelContext,
-  WorkspacePanelContribution,
+  WorkspacePanelContextV5,
+  WorkspacePanelContributionV5,
 } from "@jmfederico/pi-web/plugin-api";
 import {
   AutomationsController,
@@ -28,19 +28,19 @@ import { automationColor, costSummary, formatCost, runTimeline, sessionHref, TIM
 const AUTOMATIONS_PANEL_ID = "workspace.automations";
 const activityElementTag = "pi-web-automations-activity";
 
-export function createAutomationsBrowserContributions(html: HtmlTemplateTag, svg: SvgTemplateTag): PluginContributions {
+export function createAutomationsBrowserContributions(html: HtmlTemplateTag, svg: SvgTemplateTag): PluginContributionsV5 {
   const controller = new AutomationsController();
   defineActivityElement();
   return { workspacePanels: [createPanel(html, svg, controller)] };
 }
 
-function createPanel(html: HtmlTemplateTag, svg: SvgTemplateTag, controller: AutomationsController): WorkspacePanelContribution {
+function createPanel(html: HtmlTemplateTag, svg: SvgTemplateTag, controller: AutomationsController): WorkspacePanelContributionV5 {
   return {
     id: AUTOMATIONS_PANEL_ID,
     title: "Automations",
     order: 25,
     icon: svg`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4M16 2v4M3 10h18"/><rect x="3" y="4" width="18" height="17" rx="2"/><path d="m9 15 2 2 4-4"/></svg>`,
-    visible: (context) => context.peer?.request !== undefined,
+    visible: (context) => context.peer?.request !== undefined && context.backend !== undefined,
     badge: (context) => {
       const snapshot = controller.state(context).snapshot;
       const active = snapshot?.runs.filter((run) => activeRun(run)).length ?? 0;
@@ -51,7 +51,7 @@ function createPanel(html: HtmlTemplateTag, svg: SvgTemplateTag, controller: Aut
   };
 }
 
-function renderPanel(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext) {
+function renderPanel(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5) {
   const state = controller.state(context);
   return html`
     <section class="automations-panel">
@@ -73,7 +73,7 @@ function renderPanel(html: HtmlTemplateTag, controller: AutomationsController, c
   `;
 }
 
-function renderEditor(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext, state: AutomationPanelState) {
+function renderEditor(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, state: AutomationPanelState) {
   const editor = state.editor;
   if (editor === undefined) return null;
   const snapshot = state.snapshot;
@@ -84,6 +84,19 @@ function renderEditor(html: HtmlTemplateTag, controller: AutomationsController, 
     <form class="automation-editor" @submit=${(event: SubmitEvent) => { event.preventDefault(); void controller.saveEditor(context); }}>
       <header><h3>${editor.automationId === undefined ? "Create automation" : "Edit automation"}</h3><span>Saved definition changes require another successful test run.</span></header>
       <div class="form-grid">
+        ${editor.automationId === undefined ? html`
+          <label class="wide">Target workspace
+            <select ?disabled=${state.mutating} .value=${JSON.stringify([editor.projectId, editor.workspaceId])} @change=${(event: Event) => {
+              const target = state.targets?.find((item) => JSON.stringify([item.projectId, item.workspaceId]) === inputValue(event));
+              if (target) controller.updateEditor(context, { projectId: target.projectId, workspaceId: target.workspaceId });
+            }}>
+              <option value=${JSON.stringify([context.workspace.projectId, context.workspace.id])} ?selected=${editor.projectId === context.workspace.projectId && editor.workspaceId === context.workspace.id}>Current: ${context.workspace.label} (${context.workspace.projectId} / ${context.workspace.id})</option>
+              ${(state.targets ?? []).filter((target) => target.projectId !== context.workspace.projectId || target.workspaceId !== context.workspace.id).map((target) => html`<option value=${JSON.stringify([target.projectId, target.workspaceId])} ?selected=${editor.projectId === target.projectId && editor.workspaceId === target.workspaceId}>${target.label}</option>`)}
+            </select>
+            <small>Registered targets on ${context.machine.name}, including empty workspaces. The backend validates the selected IDs again when saving.</small>
+          </label>
+          ${state.targetError === undefined ? null : html`<p role="alert">${state.targetError} <button type="button" @click=${() => { void controller.discoverTargets(context); }}>Retry discovery</button></p>`}
+        ` : html`<p class="wide">Target: ${editor.projectId} / ${editor.workspaceId} (saved target cannot be changed)</p>`}
         <label>Name<input required maxlength="120" .value=${editor.name} @input=${(event: Event) => { controller.updateEditor(context, { name: inputValue(event) }); }}></label>
         <label>Description<input maxlength="500" .value=${editor.description} @input=${(event: Event) => { controller.updateEditor(context, { description: inputValue(event) }); }}></label>
         <label class="wide">Prompt<textarea required rows="6" .value=${editor.prompt} @input=${(event: Event) => { controller.updateEditor(context, { prompt: inputValue(event) }); }}></textarea></label>
@@ -102,7 +115,7 @@ function renderEditor(html: HtmlTemplateTag, controller: AutomationsController, 
   `;
 }
 
-function renderTriggerEditor(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext, editor: AutomationEditor) {
+function renderTriggerEditor(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, editor: AutomationEditor) {
   const trigger = editor.trigger;
   return html`
     <label>Schedule
@@ -119,7 +132,7 @@ function renderTriggerEditor(html: HtmlTemplateTag, controller: AutomationsContr
   `;
 }
 
-function renderModelEditor(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext, editor: AutomationEditor) {
+function renderModelEditor(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, editor: AutomationEditor) {
   const policy = editor.model;
   return html`
     <label>Model policy
@@ -135,7 +148,7 @@ function renderModelEditor(html: HtmlTemplateTag, controller: AutomationsControl
   `;
 }
 
-function renderDefinitions(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext, state: AutomationPanelState) {
+function renderDefinitions(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, state: AutomationPanelState) {
   const definitions = state.snapshot?.definitions;
   if (definitions === undefined) return html`<p class="empty">${state.loading ? "Loading automations…" : "Automations unavailable."}</p>`;
   if (definitions.length === 0) return html`<section><h3>Definitions</h3><p class="empty">No automations yet. Create a disabled draft, run it successfully, then enable its schedule.</p></section>`;
@@ -144,7 +157,7 @@ function renderDefinitions(html: HtmlTemplateTag, controller: AutomationsControl
   `;
 }
 
-function renderDefinition(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext, state: AutomationPanelState, definition: AutomationDefinition) {
+function renderDefinition(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, state: AutomationPanelState, definition: AutomationDefinition) {
   const tested = definition.testedRevision === definition.revision;
   const runs = (state.snapshot?.runs ?? []).filter((run) => run.automationId === definition.id);
   const latestSession = [...runs].filter((run) => run.sessionId !== undefined).sort((a, b) => b.queuedAt.localeCompare(a.queuedAt))[0];
@@ -168,7 +181,7 @@ function renderDefinition(html: HtmlTemplateTag, controller: AutomationsControll
   `;
 }
 
-function renderRuns(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContext, state: AutomationPanelState) {
+function renderRuns(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, state: AutomationPanelState) {
   const runs = state.snapshot?.runs ?? [];
   return html`
     <section class="runs"><h3>Recent runs</h3>
@@ -181,11 +194,11 @@ function renderRuns(html: HtmlTemplateTag, controller: AutomationsController, co
   `;
 }
 
-function renderSessionLink(html: HtmlTemplateTag, context: WorkspacePanelContext, run: AutomationRun, label = "Open session") {
+function renderSessionLink(html: HtmlTemplateTag, context: WorkspacePanelContextV5, run: AutomationRun, label = "Open session") {
   return run.sessionId === undefined ? null : html`<a href=${sessionHref(context.machine.id, context.workspace.projectId, context.workspace.id, run.sessionId)}>${label}</a>`;
 }
 
-function renderTimeline(html: HtmlTemplateTag, context: WorkspacePanelContext, runs: AutomationRun[]) {
+function renderTimeline(html: HtmlTemplateTag, context: WorkspacePanelContextV5, runs: AutomationRun[]) {
   if (runs.length === 0) return null;
   const timeline = runTimeline(runs);
   if (timeline.blocks.length === 0) return null;
@@ -208,7 +221,7 @@ function renderTimeline(html: HtmlTemplateTag, context: WorkspacePanelContext, r
   </details>`;
 }
 
-function renderRunDetails(html: HtmlTemplateTag, context: WorkspacePanelContext, run: AutomationRun) {
+function renderRunDetails(html: HtmlTemplateTag, context: WorkspacePanelContextV5, run: AutomationRun) {
   return html`${run.error === undefined ? null : html`<span class="run-error">${run.error}</span>`}${run.reason === undefined ? null : html`<small>Reason: ${run.reason}</small>`}${renderSessionLink(html, context, run)}${run.attempt?.forceStopped === true ? html`<small>Force stop requested; outcome unconfirmed.</small>` : null}`;
 }
 
@@ -234,10 +247,10 @@ function inputValue(event: Event): string {
 
 class AutomationsActivityElement extends HTMLElement {
   private currentController?: AutomationsController;
-  private currentContext?: WorkspacePanelContext;
+  private currentContext?: WorkspacePanelContextV5;
   private readonly onVisibility = (): void => { if (this.currentController !== undefined && this.currentContext !== undefined) this.currentController.visibilityChanged(this.currentContext, document.visibilityState !== "hidden"); };
   set controller(value: AutomationsController) { this.currentController = value; this.tryConnect(); }
-  set context(value: WorkspacePanelContext) { this.currentContext = value; this.tryConnect(); }
+  set context(value: WorkspacePanelContextV5) { this.currentContext = value; this.tryConnect(); }
   connectedCallback(): void { document.addEventListener("visibilitychange", this.onVisibility); this.tryConnect(); }
   disconnectedCallback(): void { document.removeEventListener("visibilitychange", this.onVisibility); if (this.currentController !== undefined && this.currentContext !== undefined) this.currentController.disconnect(this.currentContext); }
   private tryConnect(): void { if (this.isConnected && this.currentController !== undefined && this.currentContext !== undefined) this.currentController.connect(this.currentContext, document.visibilityState !== "hidden"); }
