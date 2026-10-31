@@ -2,32 +2,34 @@
 
 Durable, machine-local scheduled Pi jobs with a workspace panel, SQLite history, and a bundled Pi companion extension.
 
-**Cooperative scheduler, built on upstream's user-owned session contract.** Version `0.1.2` targets PI WEB `^1.202610.3` (browser API v4, server API v3) and Pi coding agent `^1.0.0`, developed against Pi `1.2.0`. Pi 0.x and 2.x are outside this release's supported range.
+**Cooperative scheduler, built on upstream's user-owned session contract.** Version `0.2.0` requires Node.js **22.19+**, PI WEB **`^1.202610.9`** (browser and server API v5), and Pi coding agent **`^1.4.0`**. Older hosts and Pi 0.x/2.x are unsupported.
 
-## Next release (development checkout)
+## Updated in 0.2.0
 
-The checkout now requires the published PI WEB **1.202610.9+** and Pi coding agent **1.4.0+** (within their current major ranges). Browser and server entries use API v5 and share management operations through the host's scoped backend transport. SQLite is runtime-provided through Node 22.19+, with no native SQLite dependency. This work is not yet published; the 0.1.2 compatibility statement above and release notes describe the previous release.
+Browser and chat management share the host's scoped backend transport; chat no longer needs an open browser or a browser-established binding. Registered-project/workspace discovery includes empty targets, with exact-ID selection for new drafts. The management tool is deferred and discoverable through tool search. SQLite now comes from Node (`node:sqlite`), with no native addon; existing schema-v1 definitions and history remain readable in place. The correlated execution runner and its safety checks are retained—see the [host-runner assessment](docs/migration.md#host-runner-decision).
 
-## Updated in 0.1.2
+See the [0.2.0 release notes](docs/releases/0.2.0.md) for compatibility, verification and upgrade guidance. The minor version marks the raised host baseline and removed legacy management transport, not a database schema break. Publication uses [GitHub Actions and npm trusted publishing](docs/publishing.md); a prepared checkout is not proof that a version is public.
+
+## Earlier releases
 
 The companion now handles Pi 1.2's user/custom-message startup event types. An unrelated custom-message run ends automation attribution as `unknown`; it must not be cancelled or counted as successful automation work. Development dependencies, compatibility peers, and browser test fixtures have been updated for current PI WEB. No storage migration or change to cooperative cancellation is required.
 
-This release also includes the previously unreleased chat-management tool: list and inspect automations, save disabled drafts and edits, run/test, enable/pause, delete, and cancel by exact ID. See [Manage automations from chat](#manage-automations-from-chat) and the [0.1.2 release notes](docs/releases/0.1.2.md).
+Version `0.1.2` introduced the chat-management tool: list and inspect automations, save disabled drafts and edits, run/test, enable/pause, delete, and cancel by exact ID. See [Manage automations from chat](#manage-automations-from-chat) and the [0.1.2 release notes](docs/releases/0.1.2.md).
 
 ## Fixed in 0.1.1
 
 The published `0.1.0` server entry can fail with `Cannot find package '@jmfederico/pi-web'`. Pi-managed installs intentionally skip automatic peer installation, and the running host's installation is not necessarily visible to Node from the plugin directory. Rebooting does not fix that package-resolution error.
 
-Version `0.1.1` fixes the packaging by bundling the public host capability helpers into the server entry, while leaving SQLite and Croner as runtime dependencies. The managed-install check now verifies imports without either host peer installed. The fix is retained in `0.1.2`; use this release with its compatible hosts or a verified local build. Updating the package does not activate server changes until a safe, operator-controlled daemon restart; do not interrupt active sessions to apply it. This issue is separate from a web-to-daemon connection failure.
+Version `0.1.1` fixed the packaging by bundling the public host capability helpers into the server entry. That fix is retained in `0.2.0` for server and companion helpers; Croner is now the only runtime dependency and SQLite is runtime-provided. The managed-install check verifies imports without either host peer installed. Updating the package does not activate server changes until a safe, operator-controlled daemon restart; do not interrupt active sessions to apply it. This issue is separate from a web-to-daemon connection failure.
 
 ## Try it safely
 
 1. Use Node.js 22.19+ and a compatible PI WEB installation.
-2. In the target machine's **Settings → Pi packages**, install the npm package `@compn3rd/pi-web-automations` (use `@compn3rd/pi-web-automations@0.1.2` to pin this release). Install it as a **Pi package**, so both the PI WEB entries and `dist/companion.js` are discovered. Trust/enable its Pi extension and enable the `automations` PI WEB plugin. A plugin-only symlink is insufficient for companion discovery.
+2. In the target machine's **Settings → Pi packages**, install the npm package `@compn3rd/pi-web-automations` (use `@compn3rd/pi-web-automations@0.2.0` to pin this release). Install it as a **Pi package**, so both the PI WEB entries and `dist/companion.js` are discovered. Trust/enable its Pi extension and enable the `automations` PI WEB plugin. A plugin-only symlink is insufficient for companion discovery.
 3. When safe, restart the target session daemon and reload the browser. Do not restart a daemon hosting work you need to keep running.
 4. Open **Automations**, save a disabled draft, use **Run now / test**, then enable that tested revision's schedule.
 
-For source development, run `npm ci && npm run verify` in a checkout, then install the built directory as a local Pi package instead of the npm package. See the [0.1.2 release notes](docs/releases/0.1.2.md) for current compatibility and update guidance, the [0.1.1 release notes](docs/releases/0.1.1.md) for the retained packaging fix, and the [0.1.0 release notes](docs/releases/0.1.0.md) for initial features and operating limitations.
+For source development, run `npm ci && npm run verify` in a checkout, then install the built directory as a local Pi package instead of the npm package. See the [0.2.0 release notes](docs/releases/0.2.0.md) for current compatibility and update guidance, the [0.1.1 release notes](docs/releases/0.1.1.md) for the retained packaging fix, and the [0.1.0 release notes](docs/releases/0.1.0.md) for initial features and operating limitations.
 
 Fixed provider/model IDs are entered manually and validated by the companion at test/run. No silent fallback is used. Sessions are visible, user-owned conversations—not exclusively leased background runtimes. Unconfirmed execution blocks the definition, including after edits and restarts; inspect Sessions before creating a replacement.
 
