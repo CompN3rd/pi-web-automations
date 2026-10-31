@@ -1,87 +1,33 @@
-import type { PiWebHostPiSessionConnection, PiWebHostPiSessionEventsV1, PiWebHostWorkspacesV1, ServerPluginPeerRequestContext } from "@jmfederico/pi-web/server-plugin-api";
-import { CHAT_REQUEST, CHAT_REPLY, chatRecord, chatString } from "../browser/chat-protocol.js";
+import { hostname } from "node:os";
+import type { PiWebHostWorkspacesV1, PluginCatalogV1 } from "@jmfederico/pi-web/server-plugin-api";
+import { chatRecord, chatString } from "../browser/chat-protocol.js";
 import type { AutomationService } from "./automation-service.js";
 import { parseDraft, parsePatch } from "./automation-backend.js";
 
-interface ChatBinding {
-  projectId: string;
-  workspaceId: string;
-  connection: Promise<PiWebHostPiSessionConnection>;
-  connected?: PiWebHostPiSessionConnection;
-}
-
-/** Connections are authorized by the host, not by tool-supplied paths or machine ids. */
+/** Shared machine-local management, with fresh host authority before every mutation. */
 export class AutomationChat {
-  // Workspace aliases can share a native session bus; only one scope may subscribe.
-  private readonly connections = new Map<string, ChatBinding>();
-  private closed = false;
   constructor(
     private readonly service: AutomationService,
-    private readonly events: PiWebHostPiSessionEventsV1,
     private readonly workspaces: PiWebHostWorkspacesV1,
+    private readonly catalog: PluginCatalogV1,
     private readonly lifetime: AbortSignal,
   ) {}
 
-  async bind(context: ServerPluginPeerRequestContext): Promise<{ connected: true }> {
-    this.lifetime.throwIfAborted();
-    context.signal.throwIfAborted();
-    if (this.closed) throw new Error("Automation chat connection closed");
-    const input = chatRecord(context.input);
-    if (Object.keys(input).some((key) => !["sessionId", "machineId", "machineName"].includes(key))) throw new Error("Unexpected chat binding field");
-    const sessionId = chatString(input["sessionId"]);
-    const machine = { id: chatString(input["machineId"]), name: chatString(input["machineName"]) };
-    const selection = { projectId: context.project.id, workspaceId: context.workspace.id, sessionId };
-    let binding = this.connections.get(sessionId);
-    if (binding && (binding.projectId !== selection.projectId || binding.workspaceId !== selection.workspaceId)) {
-      throw new Error("Automation chat session is already bound to a different workspace");
+  async currentWorkspace(hint: unknown, signal: AbortSignal): Promise<{ projectId: string; workspaceId: string } | undefined> {
+    if (typeof hint !== "string") return undefined;
+    const matches = [];
+    for (const project of await this.catalog.projects.list({ signal })) {
+      for (const workspace of await this.catalog.workspaces.list(project.id, { signal })) {
+        if (workspace.path === hint) matches.push({ projectId: project.id, workspaceId: workspace.id });
+      }
     }
-    if (!binding) {
-      const created: ChatBinding = {
-        projectId: selection.projectId,
-        workspaceId: selection.workspaceId,
-        connection: Promise.resolve().then(() => {
-          if (this.closed || this.lifetime.aborted) throw new Error("Automation chat connection closed");
-          return this.events.connect(selection);
-        }).then((connected) => {
-          if (this.closed || this.lifetime.aborted || connected.signal.aborted) { connected.close(); throw new Error("Automation chat connection closed"); }
-          created.connected = connected;
-          connected.on(CHAT_REQUEST, async (data) => {
-            let requestId: string;
-            try { requestId = chatString(chatRecord(data)["requestId"]); } catch { return; }
-            try {
-              this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
-              const value = await this.query({ projectId: selection.projectId, workspaceId: selection.workspaceId }, machine, data, connected.signal);
-              this.lifetime.throwIfAborted(); connected.signal.throwIfAborted();
-              connected.emit(CHAT_REPLY, { requestId, value });
-            } catch (error) {
-              if (!this.lifetime.aborted && !connected.signal.aborted) connected.emit(CHAT_REPLY, { requestId, error: `Selected machine ${machine.name} (${machine.id}): ${error instanceof Error ? error.message : String(error)}` });
-            }
-          });
-          connected.signal.addEventListener("abort", () => {
-            if (this.connections.get(sessionId) === created) this.connections.delete(sessionId);
-          }, { once: true });
-          return connected;
-        }),
-      };
-      binding = created;
-      this.connections.set(sessionId, created);
-      void created.connection.catch(() => {
-        created.connected?.close();
-        if (this.connections.get(sessionId) === created) this.connections.delete(sessionId);
-      });
-    }
-    await binding.connection;
-    context.signal.throwIfAborted();
-    return { connected: true };
+    this.lifetime.throwIfAborted(); signal.throwIfAborted();
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
-  close(): void {
-    this.closed = true;
-    for (const binding of this.connections.values()) binding.connected?.close();
-    this.connections.clear();
-  }
-
-  private async query(current: { projectId: string; workspaceId: string }, machine: { id: string; name: string }, data: unknown, signal: AbortSignal) {
+  async query(current: { projectId: string; workspaceId: string } | undefined, data: unknown, signal: AbortSignal) {
+    this.lifetime.throwIfAborted(); signal.throwIfAborted();
+    const machine = { id: "local", name: hostname(), scope: "backend machine" };
     const input = chatRecord(data);
     const action = input["action"];
     const fields = action === "list" ? [] : action === "inspect" ? ["automationId"]
@@ -90,37 +36,42 @@ export class AutomationChat {
       : ["run", "enable", "pause", "delete"].includes(String(action)) ? ["automationId", "expectedRevision"]
       : action === "cancel" ? ["automationId", "runId"] : undefined;
     if (!fields) throw new Error("Unsupported automation chat action");
-    if (Object.keys(input).some((key) => !["requestId", "action", ...fields].includes(key))) throw new Error("Unexpected automation query field");
+    if (Object.keys(input).some((key) => !["action", ...fields].includes(key))) throw new Error("Unexpected automation query field");
     if (action === "create") {
-      const currentAuthority = await this.workspaces.resolve(current);
-      this.lifetime.throwIfAborted(); signal.throwIfAborted();
       const hasTarget = input["projectId"] !== undefined || input["workspaceId"] !== undefined;
       const scope = hasTarget ? { projectId: chatString(input["projectId"]), workspaceId: chatString(input["workspaceId"]) } : current;
-      const authority = hasTarget ? await this.workspaces.resolve(scope) : currentAuthority;
+      if (!scope) throw new Error("Current workspace is ambiguous or unavailable; discover targets and supply BOTH exact projectId/workspaceId");
+      const authority = await this.workspaces.resolve(scope);
       this.lifetime.throwIfAborted(); signal.throwIfAborted();
       const definition = this.service.create({ ...scope, workspacePath: authority.workspace.path }, parseDraft(input["draft"]));
       return { machine, project: authority.project, workspace: authority.workspace, saved: true, definition,
         message: "Saved disabled draft. Run/test this revision successfully before enabling its schedule." };
     }
     if (action === "list") {
-      const currentAuthority = await this.workspaces.resolve(current);
-      this.lifetime.throwIfAborted(); signal.throwIfAborted();
-      const scopes = this.service.definitionScopes();
-      const ordered = [current, ...scopes.filter((scope) => scope.projectId !== current.projectId || scope.workspaceId !== current.workspaceId)];
+      const currentAuthority = current ? await this.workspaces.resolve(current) : undefined;
+      const projects = await this.catalog.projects.list({ signal });
+      const scopes = [];
+      for (const project of projects) {
+        for (const workspace of await this.catalog.workspaces.list(project.id, { signal })) {
+          scopes.push({ projectId: project.id, workspaceId: workspace.id });
+        }
+      }
+      const ordered = current ? [current, ...scopes.filter((scope) => scope.projectId !== current.projectId || scope.workspaceId !== current.workspaceId)] : scopes;
       const groups = [];
       let unavailableWorkspaces = 0;
       for (const scope of ordered) {
         let authority = currentAuthority;
-        if (scope.projectId !== current.projectId || scope.workspaceId !== current.workspaceId) {
+        if (scope.projectId !== current?.projectId || scope.workspaceId !== current.workspaceId) {
           try { authority = await this.workspaces.resolve(scope); }
           catch { unavailableWorkspaces += 1; continue; }
         }
         this.lifetime.throwIfAborted(); signal.throwIfAborted();
+        if (!authority) throw new Error("Missing workspace authority");
         const definitions = this.service.list({ ...scope, workspacePath: authority.workspace.path });
         groups.push({ project: authority.project, workspace: authority.workspace,
           definitions: definitions.map((definition) => ({ id: definition.id, name: definition.name, description: definition.description, enabled: definition.enabled, revision: definition.revision, testedRevision: definition.testedRevision, trigger: definition.trigger })) });
       }
-      return { machine, currentWorkspace: currentAuthority.workspace, generatedAt: new Date().toISOString(), unavailableWorkspaces, workspaces: groups };
+      return { machine, currentWorkspace: currentAuthority?.workspace, generatedAt: new Date().toISOString(), unavailableWorkspaces, workspaces: groups };
     }
     const automationId = chatString(input["automationId"]);
     const storedScope = this.service.definitionScope(automationId);

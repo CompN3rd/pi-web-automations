@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createCompanionBackend } from "@jmfederico/pi-web/server-plugin-api";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { CHAT_REPLY, CHAT_REQUEST, chatRecord } from "./browser/chat-protocol.js";
+import { chatRecord } from "./browser/chat-protocol.js";
 
 // Plain JSON Schema keeps the compiled companion free of host runtime dependencies.
 const textSchema = { type: "string" };
@@ -21,14 +21,17 @@ const requirements = {
 };
 
 export function registerAutomationChatTool(pi: Pick<ExtensionAPI, "on" | "events" | "registerTool">): void {
-  const pending = new Set<(error: Error) => void>();
-  pi.on("session_shutdown", () => {
-    for (const reject of pending) reject(new Error("Automation chat session closed. If changing state, inspect/list before retrying; saving may already have occurred or another action may have been accepted."));
-  });
+  // Deferred tool definitions are not initially model-visible. Keep only discovery
+  // guidance in the prompt; the full operation schema is loaded on demand.
+  pi.on("before_agent_start", (event) => ({
+    systemPrompt: event.systemPrompt + "\nFor durable scheduled jobs, discover the deferred automations tool with tool_search. It lists exact registered workspace targets, saves disabled drafts, and manages test-before-enable schedules on this session's hosting machine. Do not inspect databases or load skills as a fallback.",
+  }));
   pi.registerTool({
     name: "automations",
     label: "Automations",
-    description: "List, inspect, create disabled drafts, update saved requirements, run/test, enable/pause, delete, or cancel Automations on this PI WEB session's selected machine, across workspaces (current first). Use list/inspect to get exact automationId and expectedRevision; never substitute a duplicate name or retry a revision conflict blindly. Create uses current workspace unless BOTH exact projectId/workspaceId are supplied; never infer another workspace from a path. Use draft for create, nonempty patch for update. Explicit unambiguous user requests authorize execution immediately; ask only when target/change is ambiguous. Edits pause schedules and clear successful-test status; unconfirmed work stays blocked. Reports saved definition and machine/project/workspace. Run queues a test, not completion; inspect for status/sessionId. Enable requires successful retesting of the current revision. Pause does not cancel runs. Delete archives and retains history, not a stop. Cancel requires exact automationId AND runId from inspect; cancellation intent is not confirmed settlement or force-stop. No unblock action. If unavailable, report error; no SQL, database hunting, local fallback, or skill loading. On timeout/cancellation/lost reply inspect before retrying: the action may already have been accepted, including a run or deletion.",
+    exposure: "deferred",
+    promptSnippet: "Manage durable Automations: discover the deferred automations tool to list registered workspace targets (including empty ones), save disabled drafts, test and enable schedules.",
+    description: "List, inspect, create disabled drafts, update saved requirements, run/test, enable/pause, delete, or cancel Automations on this PI WEB session's hosting machine, across registered workspaces, including empty targets (unambiguous current workspace first). Use list/inspect to get exact automationId and expectedRevision; never substitute a duplicate name or retry a revision conflict blindly. List discovers exact projectId/workspaceId targets. Create uses current workspace only when unambiguous, unless BOTH exact projectId/workspaceId are supplied; never infer another workspace from a path. Use draft for create, nonempty patch for update. Explicit unambiguous user requests authorize execution immediately; ask only when target/change is ambiguous. Edits pause schedules and clear successful-test status; unconfirmed work stays blocked. Reports saved definition and machine/project/workspace. Run queues a test, not completion; inspect for status/sessionId. Enable requires successful retesting of the current revision. Pause does not cancel runs. Delete archives and retains history, not a stop. Cancel requires exact automationId AND runId from inspect; cancellation intent is not confirmed settlement or force-stop. No unblock action. If unavailable, report error; no SQL, database hunting, local fallback, or skill loading. On timeout/cancellation/lost reply inspect before retrying: the action may already have been accepted, including a run or deletion.",
     // JSON Schema is intentionally dependency-free in the managed companion artifact.
     parameters: {
       type: "object", properties: {
@@ -50,33 +53,21 @@ export function registerAutomationChatTool(pi: Pick<ExtensionAPI, "on" | "events
         { properties: { action: { const: "cancel" } }, required: ["automationId", "runId"] },
       ],
     },
-    async execute(_id, params, signal) {
+    async execute(_id, params, signal, _update, ctx) {
       const input = chatRecord(params);
       if (!["list", "inspect", "create", "update", "run", "enable", "pause", "delete", "cancel"].includes(String(input["action"]))) throw new Error("Use list, inspect, create, update, run, enable, pause, delete, or cancel");
       if (!["list", "create"].includes(String(input["action"])) && typeof input["automationId"] !== "string") throw new Error("Action requires an exact automationId from list");
       const changing = !["list", "inspect"].includes(String(input["action"]));
       const uncertain = changing ? " Saving may already have occurred or another action may have been accepted; inspect/list before retrying." : "";
-      const requestId = randomUUID();
-      const value = await new Promise<unknown>((resolve, reject) => {
-        const finish = (error?: Error, result?: unknown) => {
-          clearTimeout(timer); unsubscribe(); signal?.removeEventListener("abort", abort); pending.delete(stop);
-          if (error) reject(error); else resolve(result);
-        };
-        const stop = (error: Error) => { finish(error); };
-        const abort = () => { finish(new Error(`Automation request cancelled.${uncertain}`)); };
-        const timer = setTimeout(() => { finish(new Error("Automations backend unavailable on this session's selected machine. Open/reload its PI WEB workspace chat and check the Automations plugin and companion. No local fallback was used." + uncertain)); }, 5_000);
-        pending.add(stop);
-        const unsubscribe = pi.events.on(CHAT_REPLY, (data) => {
-          const reply = chatRecord(data);
-          if (reply["requestId"] !== requestId) return;
-          if (typeof reply["error"] === "string") finish(new Error(reply["error"]));
-          else finish(undefined, reply["value"]);
-        });
-        signal?.addEventListener("abort", abort, { once: true });
-        if (signal?.aborted === true) { abort(); return; }
-        try { pi.events.emit(CHAT_REQUEST, { requestId, ...input }); }
-        catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
-      });
+      let value: unknown;
+      try {
+        // Resolve per invocation: host revokes facades when the session/backend changes.
+        const peer = createCompanionBackend(pi.events, "automations").forScope({ kind: "machine" });
+        if (!peer.request) throw new Error("Automations backend has no request handler");
+        value = await peer.request("manage", { ...input, currentWorkspacePath: ctx.cwd }, signal ? { signal } : {});
+      } catch (error) {
+        throw new Error("Automations on this hosted session's machine: " + (error instanceof Error ? error.message : String(error)) + ". No local fallback was used." + uncertain, { cause: error });
+      }
       return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
     },
   });

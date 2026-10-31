@@ -29,9 +29,19 @@ try {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const plugin = (await import(pathToFileURL(join(root, manifest.piWeb.plugins[0].serverModule)).href)).default;
   const companion = (await import(pathToFileURL(join(root, manifest.pi.extensions[0])).href)).default;
-  if (plugin.apiVersion !== 3 || plugin.name !== "Automations" || typeof companion !== "function") throw new Error("Packaged plugin/companion entries failed to load");
+  if (plugin.apiVersion !== 5 || plugin.name !== "Automations" || typeof companion !== "function") throw new Error("Packaged plugin/companion entries failed to load");
+  const tools = [];
+  companion({
+    registerTool: (tool) => tools.push(tool),
+    on: () => () => {},
+    events: { on: () => () => {}, emit: () => {} },
+  });
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].name, "automations");
+  assert.equal(tools[0].exposure, "deferred");
+  await assert.rejects(() => tools[0].execute("smoke", { action: "list" }, undefined, undefined, { cwd: directory }), /No local fallback/);
   const required = plugin.requires.map(({ pluginId, id, version }) => `${pluginId}:${id}@${version}`);
-  if (required.join(",") !== "pi-web.host:pi-sessions@1,pi-web.host:pi-session-events@1,pi-web.host:workspaces@1") {
+  if (required.join(",") !== "pi-web.host:pi-sessions@1,pi-web.host:pi-session-events@1,pi-web.host:workspaces@1,pi-web.host:catalog@1") {
     throw new Error("Packaged plugin lost its exact host capability requirements");
   }
   for (const capability of plugin.requires) {

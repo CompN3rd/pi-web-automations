@@ -1,6 +1,22 @@
 # Upstream plugin rewrite: migration and compatibility
 
-## Status and assessment
+## Next-release development assessment
+
+The current checkout uses published PI WEB **1.202610.9** (verified through npm registry metadata and installed public declarations) and Pi coding agent **1.4.0**. Server API v5 plus `catalog@1` provide machine-scoped management and registered-project/workspace discovery, including empty workspaces. The browser is still API v4 pending its own modernization. The sections describing 0.1.2 below remain historical until release documentation is finalized.
+
+Chat management now calls `createCompanionBackend(pi.events, "automations")` during each tool invocation. The host handles request/reply correlation, deadlines, cancellation, runtime replacement and backend revision revocation. No browser binding, management event channels or heartbeat remain. The management handler is also callable by the paired browser through workspace-scoped `manage`; the existing panel's individual workspace operations still need consolidation. Current-workspace defaults are derived from a unique catalog cwd match only, with ambiguity requiring explicit IDs. Discovery is never authority: workspaces are resolved again before reading definitions or changing state. Chat machine attribution is the backend hostname and daemon-relative `local` identity, not caller-supplied browser labels.
+
+### Host runner decision
+
+**Retain the existing execution runner for this release.** The published `PiWebHostPiSessionsV1.run()` on PI WEB 1.202610.9 supports strict model/thinking admission, a published session ID, and a completion promise with completed/failed/cancelled status. Its public `PiWebHostPiSessionRun` has **no run-specific cancellation method or token**, no partial usage/cost stream or completion totals, and no preparation-before-prompt hook for installing Automations' attributed companion task. Revocation only cancels unpublished startup; published conversations belong to the user. Starting with `run()` then sending a generic session abort would lose attribution and risk cancelling later user work. Waiting only for its completion would also lose the partial usage accounting required here.
+
+Therefore Automations keeps `sessions.create()` followed by its existing correlated prepare/run/cancel protocol and companion observation of assistant messages and `agent_settled`. Only **management transport** is replaced. The execution protocol is deliberately not removed: it provides task-attributed cooperative cancellation, interference detection and partial usage while fencing unconfirmed work. This decision is grounded in the npm-published public declarations, not inferred private host internals or main-branch features.
+
+### Packaging and verification
+
+Both the server and companion entries now bundle only the required public host helpers and MIT attribution. The separately emitted chat-tool module is bundled as well so no emitted JavaScript requires a separately installed host peer. The production-only tarball validator checks server API v5 and exact catalog/session/workspace capabilities, instantiates the companion, verifies deferred registration and fail-closed non-hosted calls, and opens runtime SQLite with no native addon or host peers installed. These are isolated tests, not hosted end-to-end or remote federation verification.
+
+## Historical 0.1.2 status and assessment
 
 This is a **cooperative scheduler** adopting upstream's user-owned session contract. It is not a drop-in replacement for the fork's exclusive background-session service. Release `0.1.2` targets `@jmfederico/pi-web@^1.202610.3` with public browser API **v4** and server API **v3**, plus `@earendil-works/pi-coding-agent@^1.0.0` (development baseline `1.2.0`). PI WEB now requires Pi 1.x; Pi 0.x and 2.x are outside this release's supported range. Earlier Automations releases targeted PI WEB `1.202609.1` and Pi 0.87; their release notes describe that historical baseline.
 

@@ -198,7 +198,7 @@ function serviceErrorCode(error: AutomationServiceError): string {
   return error.statusCode === 500 ? "internal-error" : "invalid-input";
 }
 
-function toJsonValue(value: unknown): JsonValue {
+export function toJsonValue(value: unknown): JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error("Automations result contains a non-finite number");

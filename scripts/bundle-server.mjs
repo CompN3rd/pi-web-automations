@@ -5,9 +5,9 @@ import { build } from "esbuild";
 // plugin code. SQLite comes from Node; only the scheduler is an installed dependency.
 // Keep upstream parsers rather than duplicating capability validation locally.
 const hostLicense = await readFile(new URL("../LICENSE", import.meta.resolve("@jmfederico/pi-web/server-plugin-api")), "utf8");
-await build({
-  entryPoints: ["src/server-plugin.ts"],
-  outfile: "dist/server-plugin.js",
+for (const [entry, outfile] of [["src/server-plugin.ts", "dist/server-plugin.js"], ["src/companion.ts", "dist/companion.js"], ["src/chat-tool.ts", "dist/chat-tool.js"]]) await build({
+  entryPoints: [entry],
+  outfile,
   bundle: true,
   platform: "node",
   format: "esm",
