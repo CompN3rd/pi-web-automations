@@ -45,8 +45,6 @@ async function fixture(machineId: string, execution = false) {
       expect(validated).toEqual({ action: "list" });
       validate = (input) => validateToolArguments(value, { type: "toolCall", id: "validation", name: value.name, arguments: input });
       expect(() => { validate?.({ action: "create", draft: { enabled: true } }); }).toThrow("Validation failed");
-      expect(() => { validate?.({ action: "create" }); }).toThrow("Validation failed");
-      expect(() => { validate?.({ action: "update", automationId: "id", patch: { name: "Edit" } }); }).toThrow("Validation failed");
       execute = async (args) => { const result: unknown = await Reflect.apply(value.execute.bind(value), value, args); return result; };
     },
   };
@@ -85,14 +83,16 @@ async function fixture(machineId: string, execution = false) {
     return Promise.resolve(authority(scope.workspaceId));
   });
   const targetIds = ["a-other", "z-current", "empty-other", "inaccessible"];
+  const projectsList = vi.fn(() => Promise.resolve(targetIds.map((id) => authority(id).project)));
+  const workspacesList = vi.fn((projectId: string) => Promise.resolve(targetIds.filter((id) => `p-${id}` === projectId).map((id) => ({ ...authority(id).workspace, ...(id === "alias" ? { path: "/z-current" } : {}) }))));
   const activation = await plugin.activate(context);
   await activation.start?.({ signal: context.signal, capabilities: { resolve: (capability) => capability.parse({
     "pi-sessions": { version: 1, create: createSession, run: () => Promise.reject(new Error("unused")) },
     "pi-session-events": { version: 1, connect },
     workspaces: { version: 1, resolve },
     catalog: { version: 1,
-      projects: { list: () => Promise.resolve(targetIds.map((id) => authority(id).project)), get: () => Promise.reject(new Error("unused")) },
-      workspaces: { list: (projectId: string) => Promise.resolve(targetIds.filter((id) => `p-${id}` === projectId).map((id) => ({ ...authority(id).workspace, ...(id === "alias" ? { path: "/z-current" } : {}) }))), get: () => Promise.reject(new Error("unused")) },
+      projects: { list: projectsList, get: () => Promise.reject(new Error("unused")) },
+      workspaces: { list: workspacesList, get: () => Promise.reject(new Error("unused")) },
       sessions: { list: () => Promise.resolve([]), get: () => Promise.reject(new Error("unused")) },
     },
   }[capability.id]) } });
@@ -134,7 +134,7 @@ async function fixture(machineId: string, execution = false) {
     Reflect.apply(accept, undefined, [() => backend]);
   });
   const close = () => { session.abort(); };
-  return { request, query, connect, saved, lifetime, close, bus, hooks, resolve, validate, createSession, finishTask, targetIds,
+  return { projectsList, workspacesList, request, query, connect, saved, lifetime, close, bus, hooks, resolve, validate, createSession, finishTask, targetIds,
     setCwd: (value: string) => { cwd = value; },
     unavailable: () => { available = false; },
     fixtureStore: () => { const store = new AutomationStore(join(root, "automations.sqlite")); cleanups.push(() => { store.close(); }); return store; } };
@@ -143,6 +143,94 @@ async function fixture(machineId: string, execution = false) {
 async function settle() { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }
 
 describe("host companion backend management boundary", () => {
+  it("uses a single catalog scan for agent list and keeps fresh authority checks", async () => {
+    const f = await fixture("local");
+    f.resolve.mockClear();
+    await f.query({ action: "list" });
+    expect(f.projectsList).toHaveBeenCalledTimes(1);
+    expect(f.workspacesList.mock.calls.map(([id]) => id)).toEqual(f.targetIds.map((id) => `p-${id}`));
+    expect(f.resolve.mock.calls.map(([scope]) => scope.workspaceId)).toEqual(["z-current", "a-other", "empty-other", "inaccessible"]);
+  });
+
+  it.each(["projects", "catalog workspaces", "authority"])("identifies a stalled %s read before the host deadline while the UI snapshot still works", async (stage) => {
+    const f = await fixture("local");
+    vi.useFakeTimers();
+    const baselineTimers = vi.getTimerCount();
+    if (stage === "projects") f.projectsList.mockImplementation(() => new Promise(() => undefined));
+    if (stage === "catalog workspaces") f.workspacesList.mockImplementation(() => new Promise(() => undefined));
+    if (stage === "authority") f.resolve.mockImplementation(() => new Promise(() => undefined));
+    const expected = stage === "projects" ? "catalog.projects.list" : stage === "catalog workspaces" ? "catalog.workspaces.list (project p-a-other)" : "workspaces.resolve (project p-z-current, workspace z-current)";
+    const pending = expect(f.query({ action: "list" })).rejects.toThrow(`Automation list: ${expected} exceeded the 8000ms management read budget`);
+    await settle();
+    expect(await f.request("z-current", "snapshot", { contractVersion: 1 })).toMatchObject({ value: { definitions: [{ name: "local-z-current" }] } });
+    await vi.advanceTimersByTimeAsync(8000);
+    await pending;
+    expect(vi.getTimerCount()).toBe(baselineTimers);
+    expect(f.createSession).not.toHaveBeenCalled();
+  });
+
+  it("reports catalog rejection with its exact operation, without falling back to UI storage", async () => {
+    const f = await fixture("local");
+    f.workspacesList.mockRejectedValue(new Error("Provider unavailable"));
+    await expect(f.query({ action: "list" })).rejects.toThrow("catalog.workspaces.list (project p-a-other) failed: Provider unavailable");
+    expect(await f.request("z-current", "snapshot", { contractVersion: 1 })).toMatchObject({ value: { definitions: [{ name: "local-z-current" }] } });
+  });
+
+  it("does not repeat slow provider discovery within the 10-second host budget", async () => {
+    const f = await fixture("local");
+    vi.useFakeTimers();
+    const list = f.workspacesList.getMockImplementation();
+    const resolve = f.resolve.getMockImplementation();
+    if (!list || !resolve) throw new Error("Missing fixture implementation");
+    f.workspacesList.mockImplementation(async (id) => { await new Promise((done) => setTimeout(done, 1000)); return list(id); });
+    f.resolve.mockImplementation(async (scope) => { await new Promise((done) => setTimeout(done, 750)); return resolve(scope); });
+    const pending = f.query({ action: "list" });
+    // One 4s discovery + four 750ms authority checks = 7s, not the old 11s.
+    await vi.advanceTimersByTimeAsync(7000);
+    expect((await pending)["details"]).toMatchObject({ currentWorkspace: { id: "z-current" }, unavailableWorkspaces: 1 });
+    expect(f.workspacesList).toHaveBeenCalledTimes(4);
+  });
+
+  it("omits revoked current-workspace authority just like other inaccessible workspaces", async () => {
+    const f = await fixture("local");
+    const resolve = f.resolve.getMockImplementation();
+    if (!resolve) throw new Error("Missing fixture resolver");
+    f.resolve.mockImplementation((scope) => scope.workspaceId === "z-current" ? Promise.reject(new Error("Revoked")) : resolve(scope));
+    const result = chatRecord((await f.query({ action: "list" }))["details"]);
+    expect(result).toMatchObject({ unavailableWorkspaces: 2, workspaces: [{ workspace: { id: "a-other" } }, { workspace: { id: "empty-other" } }] });
+    expect(result).not.toHaveProperty("currentWorkspace");
+  });
+
+  it("validates malformed browser management before catalog or authority reads", async () => {
+    const f = await fixture("local");
+    f.resolve.mockClear();
+    await expect(f.request("z-current", "manage", { action: "create" })).rejects.toThrow("create requires draft");
+    await expect(f.request("z-current", "manage", { action: "inspect" })).rejects.toThrow("inspect requires automationId");
+    expect(f.projectsList).not.toHaveBeenCalled();
+    expect(f.resolve).not.toHaveBeenCalled();
+  });
+
+  it("aborts catalog waits promptly and never saves after a timed-out authority read returns", async () => {
+    const f = await fixture("local");
+    vi.useFakeTimers();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const resolve = f.resolve.getMockImplementation();
+    if (!resolve) throw new Error("Missing fixture resolver");
+    f.resolve.mockImplementation(async (scope) => { await gate; return resolve(scope); });
+    const pending = expect(f.query({ action: "update", automationId: f.saved[0]?.["id"], expectedRevision: 1, patch: { prompt: "Must not save" } })).rejects.toThrow("8000ms management read budget");
+    await vi.advanceTimersByTimeAsync(8000);
+    await pending;
+    release?.(); await settle();
+    expect(f.fixtureStore().getDefinition(String(f.saved[0]?.["id"]))).toMatchObject({ revision: 1, prompt: "Saved prompt local-a-other" });
+
+    f.projectsList.mockImplementation(() => new Promise(() => undefined));
+    const caller = new AbortController();
+    const cancelled = expect(f.query({ action: "list" }, caller.signal)).rejects.toThrow("cancelled");
+    caller.abort(new Error("cancelled"));
+    await cancelled;
+  });
+
   it("needs no browser binding and refuses an ambiguous cwd default", async () => {
     const f = await fixture("local");
     expect((await f.query({ action: "list" }))["details"]).toMatchObject({ currentWorkspace: { id: "z-current" } });
@@ -161,7 +249,7 @@ describe("host companion backend management boundary", () => {
     const target = { automationId, expectedRevision: 1 };
     for (const action of ["run", "enable", "pause", "delete"]) {
       expect(f.validate?.({ action, ...target })).toEqual({ action, ...target });
-      expect(() => { f.validate?.({ action, automationId }); }).toThrow("Validation failed");
+      await expect(f.query({ action, automationId })).rejects.toThrow(`${action} requires expectedRevision`);
     }
     await expect(f.query({ action: "enable", ...target })).rejects.toThrow(`Automations on this hosted session's machine: Automation ${automationId}, project p-a-other, workspace a-other: Run this automation successfully before enabling`);
     await f.query({ action: "update", ...target, patch: { trigger: { type: "interval", intervalMs: 60000 } } });
@@ -195,7 +283,7 @@ describe("host companion backend management boundary", () => {
     await settle();
     const input = { action: "cancel", automationId, runId: String(queued["id"]) };
     expect(f.validate?.(input)).toEqual(input);
-    expect(() => { f.validate?.({ action: "cancel", automationId }); }).toThrow("Validation failed");
+    await expect(f.query({ action: "cancel", automationId })).rejects.toThrow("cancel requires runId");
     await expect(f.query({ ...input, automationId: f.saved[1]?.["id"] })).rejects.toThrow("run not found");
     const sibling = chatRecord(chatRecord((await f.query({ action: "create", projectId: "p-a-other", workspaceId: "a-other", draft: { name: "Same-workspace sibling", prompt: "Work", trigger: { type: "manual" }, model: { mode: "default" }, thinking: { mode: "default" } } }))["details"])["definition"]);
     await expect(f.query({ ...input, automationId: sibling["id"] })).rejects.toThrow("run not found");

@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 import type { PiWebHostWorkspacesV1, PluginCatalogV1 } from "@jmfederico/pi-web/server-plugin-api";
-import { chatRecord, chatString } from "../browser/chat-protocol.js";
+import { chatRecord, chatString, validateAutomationAction } from "../browser/chat-protocol.js";
 import type { AutomationService } from "./automation-service.js";
 import { parseDraft, parsePatch } from "./automation-backend.js";
 
@@ -13,60 +13,55 @@ export class AutomationChat {
     private readonly lifetime: AbortSignal,
   ) {}
 
-  async currentWorkspace(hint: unknown, signal: AbortSignal): Promise<{ projectId: string; workspaceId: string } | undefined> {
-    if (typeof hint !== "string") return undefined;
-    const matches = [];
-    for (const project of await this.catalog.projects.list({ signal })) {
-      for (const workspace of await this.catalog.workspaces.list(project.id, { signal })) {
-        if (workspace.path === hint) matches.push({ projectId: project.id, workspaceId: workspace.id });
-      }
-    }
-    this.lifetime.throwIfAborted(); signal.throwIfAborted();
-    return matches.length === 1 ? matches[0] : undefined;
+  async query(current: WorkspaceSelection | undefined, data: unknown, signal: AbortSignal, currentWorkspacePath?: unknown) {
+    const input = validateAutomationAction(data);
+    return withManagementReads(String(input["action"]), signal, this.lifetime,
+      (reads) => this.queryInput(current, input, reads, currentWorkspacePath));
   }
 
-  async query(current: { projectId: string; workspaceId: string } | undefined, data: unknown, signal: AbortSignal) {
-    this.lifetime.throwIfAborted(); signal.throwIfAborted();
+  private async discoverTargets(reads: ManagementReads) {
+    const targets = [];
+    const projects = await reads.read("catalog.projects.list", () => this.catalog.projects.list({ signal: reads.signal }));
+    for (const project of projects) {
+      const workspaces = await reads.read(`catalog.workspaces.list (project ${project.id})`, () => this.catalog.workspaces.list(project.id, { signal: reads.signal }));
+      for (const workspace of workspaces) targets.push({ projectId: project.id, workspaceId: workspace.id, path: workspace.path });
+    }
+    return targets;
+  }
+
+  private async queryInput(current: WorkspaceSelection | undefined, input: Record<string, unknown>, reads: ManagementReads, hint: unknown) {
+    const signal = reads.signal;
+    signal.throwIfAborted();
     const machine = { id: "local", name: hostname(), scope: "backend machine" };
-    const input = chatRecord(data);
     const action = input["action"];
-    const fields = action === "list" ? [] : action === "inspect" ? ["automationId"]
-      : action === "create" ? ["projectId", "workspaceId", "draft"]
-      : action === "update" ? ["automationId", "expectedRevision", "patch"]
-      : ["run", "enable", "pause", "delete"].includes(String(action)) ? ["automationId", "expectedRevision"]
-      : action === "cancel" ? ["automationId", "runId"] : undefined;
-    if (!fields) throw new Error("Unsupported automation chat action");
-    if (Object.keys(input).some((key) => !["action", ...fields].includes(key))) throw new Error("Unexpected automation query field");
+    const resolve = (scope: WorkspaceSelection) => reads.read(`workspaces.resolve (project ${scope.projectId}, workspace ${scope.workspaceId})`, () => this.workspaces.resolve(scope));
     if (action === "create") {
       const hasTarget = input["projectId"] !== undefined || input["workspaceId"] !== undefined;
+      if (!hasTarget && !current && typeof hint === "string") current = currentWorkspace(await this.discoverTargets(reads), hint);
       const scope = hasTarget ? { projectId: chatString(input["projectId"]), workspaceId: chatString(input["workspaceId"]) } : current;
       if (!scope) throw new Error("Current workspace is ambiguous or unavailable; discover targets and supply BOTH exact projectId/workspaceId");
-      const authority = await this.workspaces.resolve(scope);
+      const authority = await resolve(scope);
       this.lifetime.throwIfAborted(); signal.throwIfAborted();
       const definition = this.service.create({ ...scope, workspacePath: authority.workspace.path }, parseDraft(input["draft"]));
       return { machine, project: authority.project, workspace: authority.workspace, saved: true, definition,
         message: "Saved disabled draft. Run/test this revision successfully before enabling its schedule." };
     }
     if (action === "list") {
-      const currentAuthority = current ? await this.workspaces.resolve(current) : undefined;
-      const projects = await this.catalog.projects.list({ signal });
-      const scopes = [];
-      for (const project of projects) {
-        for (const workspace of await this.catalog.workspaces.list(project.id, { signal })) {
-          scopes.push({ projectId: project.id, workspaceId: workspace.id });
-        }
-      }
-      const ordered = current ? [current, ...scopes.filter((scope) => scope.projectId !== current.projectId || scope.workspaceId !== current.workspaceId)] : scopes;
+      // One catalog snapshot serves both cwd disambiguation and listing. Repeating
+      // provider discovery here used to consume the host's 10-second callback budget.
+      const targets = await this.discoverTargets(reads);
+      const selected = current ?? currentWorkspace(targets, hint);
+      const scopes = targets.map(({ projectId, workspaceId }) => ({ projectId, workspaceId }));
+      const ordered = selected ? [selected, ...scopes.filter((scope) => scope.projectId !== selected.projectId || scope.workspaceId !== selected.workspaceId)] : scopes;
       const groups = [];
+      let currentAuthority;
       let unavailableWorkspaces = 0;
       for (const scope of ordered) {
-        let authority = currentAuthority;
-        if (scope.projectId !== current?.projectId || scope.workspaceId !== current.workspaceId) {
-          try { authority = await this.workspaces.resolve(scope); }
-          catch { unavailableWorkspaces += 1; continue; }
-        }
-        this.lifetime.throwIfAborted(); signal.throwIfAborted();
-        if (!authority) throw new Error("Missing workspace authority");
+        let authority;
+        try { authority = await resolve(scope); }
+        catch { signal.throwIfAborted(); unavailableWorkspaces += 1; continue; }
+        if (scope.projectId === selected?.projectId && scope.workspaceId === selected.workspaceId) currentAuthority = authority;
+        signal.throwIfAborted();
         const definitions = this.service.list({ ...scope, workspacePath: authority.workspace.path });
         groups.push({ project: authority.project, workspace: authority.workspace,
           definitions: definitions.map((definition) => ({ id: definition.id, name: definition.name, description: definition.description, enabled: definition.enabled, revision: definition.revision, testedRevision: definition.testedRevision, trigger: definition.trigger })) });
@@ -78,8 +73,8 @@ export class AutomationChat {
     const notFound = "Automation not found in currently accessible workspaces on this machine; list and use an exact id";
     if (!storedScope) throw new Error(notFound);
     let authority;
-    try { authority = await this.workspaces.resolve(storedScope); }
-    catch { throw new Error(notFound); }
+    try { authority = await resolve(storedScope); }
+    catch { signal.throwIfAborted(); throw new Error(notFound); }
     this.lifetime.throwIfAborted(); signal.throwIfAborted();
     const scope = { ...storedScope, workspacePath: authority.workspace.path };
     const definition = this.service.inspect(automationId, scope);
@@ -123,5 +118,52 @@ export class AutomationChat {
     }
     return { ...attribution, project: authority.project, workspace: authority.workspace, definition,
       runs: this.service.listRuns(scope, { automationId, limit: 20 }) };
+  }
+}
+
+interface WorkspaceSelection { projectId: string; workspaceId: string }
+interface ManagementReads {
+  signal: AbortSignal;
+  read<T>(operation: string, work: () => Promise<T>): Promise<T>;
+}
+
+function currentWorkspace(targets: (WorkspaceSelection & { path: string })[], hint: unknown): WorkspaceSelection | undefined {
+  if (typeof hint !== "string") return undefined;
+  const matches = targets.filter((target) => target.path === hint);
+  const match = matches.length === 1 ? matches[0] : undefined;
+  return match ? { projectId: match.projectId, workspaceId: match.workspaceId } : undefined;
+}
+
+/** Leave time to return a useful dependency error before PI WEB's 10s callback deadline. */
+async function withManagementReads<T>(action: string, caller: AbortSignal, lifetime: AbortSignal, work: (reads: ManagementReads) => Promise<T>): Promise<T> {
+  const timeout = new AbortController();
+  const signal = AbortSignal.any([caller, lifetime, timeout.signal]);
+  signal.throwIfAborted();
+  let phase = "management";
+  const timer = setTimeout(() => { timeout.abort(new Error(`Automation ${action}: ${phase} exceeded the 8000ms management read budget; check the hosting machine's catalog/workspace provider and PI WEB logs`)); }, 8000);
+  let abort = () => { signal.throwIfAborted(); };
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    abort = () => { reject(signal.reason instanceof Error ? signal.reason : new Error("Automation management cancelled")); };
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    return await Promise.race([work({
+      signal,
+      async read(operation, read) {
+        signal.throwIfAborted();
+        phase = operation;
+        try {
+          const result = await read();
+          signal.throwIfAborted();
+          return result;
+        } catch (error) {
+          signal.throwIfAborted();
+          throw new Error(`Automation ${action}: ${operation} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        }
+      },
+    }), cancelled]);
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
   }
 }

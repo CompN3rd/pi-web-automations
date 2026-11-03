@@ -44,9 +44,8 @@ export function createAutomationActivation(context: ServerPluginActivationContex
             // A cwd is only a discovery hint, never authority. Aliases are ambiguous.
             const current = request.scope.kind === "workspace"
               ? { projectId: request.scope.project.id, workspaceId: request.scope.workspace.id }
-              : (input["action"] === "create" && input["projectId"] === undefined || input["action"] === "list")
-                ? await management.currentWorkspace(hint, request.signal) : undefined;
-            return toJsonValue(await management.query(current, input, request.signal));
+              : undefined;
+            return toJsonValue(await management.query(current, input, request.signal, hint));
           })();
         }
         if (request.scope.kind !== "workspace") throw new Error("This operation requires workspace scope");

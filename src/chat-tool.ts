@@ -1,6 +1,6 @@
 import { createCompanionBackend } from "@jmfederico/pi-web/server-plugin-api";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { chatRecord } from "./browser/chat-protocol.js";
+import { validateAutomationAction } from "./browser/chat-protocol.js";
 
 // Plain JSON Schema keeps the compiled companion free of host runtime dependencies.
 const textSchema = { type: "string" };
@@ -32,7 +32,9 @@ export function registerAutomationChatTool(pi: Pick<ExtensionAPI, "on" | "events
     exposure: "deferred",
     promptSnippet: "Manage durable Automations: discover the deferred automations tool to list registered workspace targets (including empty ones), save disabled drafts, test and enable schedules.",
     description: "List, inspect, create disabled drafts, update saved requirements, run/test, enable/pause, delete, or cancel Automations on this PI WEB session's hosting machine, across registered workspaces, including empty targets (unambiguous current workspace first). Use list/inspect to get exact automationId and expectedRevision; never substitute a duplicate name or retry a revision conflict blindly. List discovers exact projectId/workspaceId targets. Create uses current workspace only when unambiguous, unless BOTH exact projectId/workspaceId are supplied; never infer another workspace from a path. Use draft for create, nonempty patch for update. Explicit unambiguous user requests authorize execution immediately; ask only when target/change is ambiguous. Edits pause schedules and clear successful-test status; unconfirmed work stays blocked. Reports saved definition and machine/project/workspace. Run queues a test, not completion; inspect for status/sessionId. Enable requires successful retesting of the current revision. Pause does not cancel runs. Delete archives and retains history, not a stop. Cancel requires exact automationId AND runId from inspect; cancellation intent is not confirmed settlement or force-stop. No unblock action. If unavailable, report error; no SQL, database hunting, local fallback, or skill loading. On timeout/cancellation/lost reply inspect before retrying: the action may already have been accepted, including a run or deletion.",
-    // JSON Schema is intentionally dependency-free in the managed companion artifact.
+    // Keep the root flat: Pi's codemode renderer ignores sibling properties/required
+    // when anyOf/oneOf/allOf is present. Action requirements are checked in execute
+    // and again by the backend, rather than reporting unrelated union failures.
     parameters: {
       type: "object", properties: {
         action: { type: "string", enum: ["list", "inspect", "create", "update", "run", "enable", "pause", "delete", "cancel"] },
@@ -41,22 +43,12 @@ export function registerAutomationChatTool(pi: Pick<ExtensionAPI, "on" | "events
         runId: { type: "string", description: "Exact run id from inspect; required for cancel together with automationId" },
         projectId: { type: "string", description: "Create target only; supply together with exact workspaceId, otherwise current workspace" },
         workspaceId: { type: "string", description: "Create target only; supply together with exact projectId" },
-        draft: { type: "object", properties: requirements, required: ["name", "prompt", "trigger", "model", "thinking"], additionalProperties: false },
-        patch: { type: "object", properties: requirements, minProperties: 1, additionalProperties: false },
+        draft: { type: "object", description: "Required for create only: disabled draft requirements", properties: requirements, required: ["name", "prompt", "trigger", "model", "thinking"], additionalProperties: false },
+        patch: { type: "object", description: "Required for update only: nonempty saved requirements to change", properties: requirements, minProperties: 1, additionalProperties: false },
       }, required: ["action"], additionalProperties: false,
-      anyOf: [
-        { properties: { action: { const: "list" } } },
-        { properties: { action: { const: "inspect" } }, required: ["automationId"] },
-        { properties: { action: { const: "create" } }, required: ["draft"] },
-        { properties: { action: { const: "update" } }, required: ["automationId", "expectedRevision", "patch"] },
-        { properties: { action: { enum: ["run", "enable", "pause", "delete"] } }, required: ["automationId", "expectedRevision"] },
-        { properties: { action: { const: "cancel" } }, required: ["automationId", "runId"] },
-      ],
     },
     async execute(_id, params, signal, _update, ctx) {
-      const input = chatRecord(params);
-      if (!["list", "inspect", "create", "update", "run", "enable", "pause", "delete", "cancel"].includes(String(input["action"]))) throw new Error("Use list, inspect, create, update, run, enable, pause, delete, or cancel");
-      if (!["list", "create"].includes(String(input["action"])) && typeof input["automationId"] !== "string") throw new Error("Action requires an exact automationId from list");
+      const input = validateAutomationAction(params);
       const changing = !["list", "inspect"].includes(String(input["action"]));
       const uncertain = changing ? " Saving may already have occurred or another action may have been accepted; inspect/list before retrying." : "";
       let value: unknown;
