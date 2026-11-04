@@ -14,7 +14,7 @@ export function validateAutomationAction(value: unknown): Record<string, unknown
     : ["run", "enable", "pause", "delete"].includes(action) ? ["automationId", "expectedRevision"]
     : action === "cancel" ? ["automationId", "runId"] : undefined;
   if (!required) throw new Error("Use list, inspect, create, update, run, enable, pause, delete, or cancel");
-  const allowed = ["action", ...required, ...(action === "create" ? ["projectId", "workspaceId"] : [])];
+  const allowed = ["action", ...required, ...(["list", "create"].includes(action) ? ["projectId", "workspaceId"] : [])];
   const unexpected = Object.keys(input).find((key) => !allowed.includes(key));
   if (unexpected !== undefined) throw new Error(`Unexpected automation ${action} field: ${unexpected}`);
   for (const field of required) {
@@ -26,8 +26,8 @@ export function validateAutomationAction(value: unknown): Record<string, unknown
       catch { throw new Error(`Automation ${action} requires an exact ${field} identity from list/inspect`); }
     }
   }
-  if (action === "create" && (input["projectId"] !== undefined) !== (input["workspaceId"] !== undefined)) {
-    throw new Error("Automation create target identity requires BOTH exact projectId/workspaceId");
+  if (["list", "create"].includes(action) && (input["projectId"] !== undefined) !== (input["workspaceId"] !== undefined)) {
+    throw new Error(`Automation ${action} target identity requires BOTH exact projectId/workspaceId`);
   }
   if (required.includes("expectedRevision")) {
     const revision = input["expectedRevision"];
