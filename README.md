@@ -2,7 +2,11 @@
 
 Durable, machine-local scheduled Pi jobs with a workspace panel, SQLite history, and a bundled Pi companion extension.
 
-**Cooperative scheduler, built on upstream's user-owned session contract.** Version `0.2.0` requires Node.js **22.19+**, PI WEB **`^1.202610.9`** (browser and server API v5), and Pi coding agent **`^1.4.0`**. Older hosts and Pi 0.x/2.x are unsupported.
+**Cooperative scheduler, built on upstream's user-owned session contract.** Version `0.2.2` requires Node.js **22.19+**, PI WEB **`^1.202610.9`** (browser and server API v5), and Pi coding agent **`^1.4.0`**. Older hosts and Pi 0.x/2.x are unsupported.
+
+## Updated in 0.2.2
+
+Chat can list one exact project/workspace without scanning unrelated providers. Supply both `projectId` and `workspaceId` to `list`; fresh requested-target authorization remains required. This fixes #3's discovery blocker, not the underlying provider stall or cross-machine routing. See the [0.2.2 release notes](docs/releases/0.2.2.md).
 
 ## Updated in 0.2.0
 
@@ -25,7 +29,7 @@ Version `0.1.1` fixed the packaging by bundling the public host capability helpe
 ## Try it safely
 
 1. Use Node.js 22.19+ and a compatible PI WEB installation.
-2. In the target machine's **Settings → Pi packages**, install the npm package `@compn3rd/pi-web-automations` (use `@compn3rd/pi-web-automations@0.2.0` to pin this release). Install it as a **Pi package**, so both the PI WEB entries and `dist/companion.js` are discovered. Trust/enable its Pi extension and enable the `automations` PI WEB plugin. A plugin-only symlink is insufficient for companion discovery.
+2. In the target machine's **Settings → Pi packages**, install the npm package `@compn3rd/pi-web-automations` (use `@compn3rd/pi-web-automations@0.2.2` to pin this release). Install it as a **Pi package**, so both the PI WEB entries and `dist/companion.js` are discovered. Trust/enable its Pi extension and enable the `automations` PI WEB plugin. A plugin-only symlink is insufficient for companion discovery.
 3. When safe, restart the target session daemon and reload the browser. Do not restart a daemon hosting work you need to keep running.
 4. Open **Automations**, save a disabled draft, use **Run now / test**, then enable that tested revision's schedule.
 
