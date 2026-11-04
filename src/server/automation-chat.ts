@@ -47,19 +47,25 @@ export class AutomationChat {
         message: "Saved disabled draft. Run/test this revision successfully before enabling its schedule." };
     }
     if (action === "list") {
-      // One catalog snapshot serves both cwd disambiguation and listing. Repeating
-      // provider discovery here used to consume the host's 10-second callback budget.
-      const targets = await this.discoverTargets(reads);
+      const requested = input["projectId"] !== undefined
+        ? { projectId: chatString(input["projectId"]), workspaceId: chatString(input["workspaceId"]) } : undefined;
+      // Exact-scope discovery must not enumerate unrelated providers, even to infer cwd.
+      // Machine-wide discovery keeps one catalog snapshot for ordering and listing.
+      const targets = requested ? [] : await this.discoverTargets(reads);
       const selected = current ?? currentWorkspace(targets, hint);
-      const scopes = targets.map(({ projectId, workspaceId }) => ({ projectId, workspaceId }));
-      const ordered = selected ? [selected, ...scopes.filter((scope) => scope.projectId !== selected.projectId || scope.workspaceId !== selected.workspaceId)] : scopes;
+      const scopes = requested ? [requested] : targets.map(({ projectId, workspaceId }) => ({ projectId, workspaceId }));
+      const ordered = !requested && selected ? [selected, ...scopes.filter((scope) => scope.projectId !== selected.projectId || scope.workspaceId !== selected.workspaceId)] : scopes;
       const groups = [];
       let currentAuthority;
       let unavailableWorkspaces = 0;
       for (const scope of ordered) {
         let authority;
         try { authority = await resolve(scope); }
-        catch { signal.throwIfAborted(); unavailableWorkspaces += 1; continue; }
+        catch (error) {
+          signal.throwIfAborted();
+          if (requested) throw error;
+          unavailableWorkspaces += 1; continue;
+        }
         if (scope.projectId === selected?.projectId && scope.workspaceId === selected.workspaceId) currentAuthority = authority;
         signal.throwIfAborted();
         const definitions = this.service.list({ ...scope, workspacePath: authority.workspace.path });

@@ -50,10 +50,13 @@ describe("automations chat-tool schema and action validation", () => {
     expect(declaration).toContain("Required for create only");
     expect(declaration).toContain("Required for update only");
     expect(declaration).toContain("required for cancel together with automationId");
+    expect(declaration).toContain("List/create target");
+    expect(declaration).toContain("Scoped list never enumerates unrelated workspaces");
   });
 
   it.each([
     { action: "list" },
+    { action: "list", projectId: "project", workspaceId: "workspace" },
     { action: "inspect", automationId: "id" },
     { action: "create", draft },
     { action: "create", draft, projectId: "project", workspaceId: "workspace" },
@@ -79,6 +82,10 @@ describe("automations chat-tool schema and action validation", () => {
     [{ action: "create", draft, projectId: "project" }, "BOTH exact projectId/workspaceId"],
     [{ action: "inspect", automationId: " " }, "exact automationId"],
     [{ action: "list", automationId: "id" }, "Unexpected automation list field"],
+    [{ action: "list", projectId: "project" }, "BOTH exact projectId/workspaceId"],
+    [{ action: "list", workspaceId: "workspace" }, "BOTH exact projectId/workspaceId"],
+    [{ action: "list", projectId: " ", workspaceId: "workspace" }, "exact projectId"],
+    [{ action: "list", projectId: "project", workspaceId: "" }, "exact workspaceId"],
   ])("rejects action-specific input %j before backend discovery", async (input, message) => {
     const f = fixture();
     await expect(f.invoke(input)).rejects.toThrow(message);
@@ -86,6 +93,7 @@ describe("automations chat-tool schema and action validation", () => {
   });
 
   it.each([
+    { action: "list", workspacePath: "/repo" },
     { action: "create", draft: { ...draft, enabled: true } },
     { action: "update", automationId: "id", expectedRevision: 0, patch: { name: "Edit" } },
     { action: "update", automationId: "id", expectedRevision: 1, patch: {} },
@@ -101,6 +109,7 @@ describe("automations chat-tool schema and action validation", () => {
       await expect(f.invoke({ action: "run", automationId: "id", expectedRevision }, false)).rejects.toThrow("positive safe integer");
     }
     for (const draft of [null, [], {}, "draft"]) await expect(f.invoke({ action: "create", draft }, false)).rejects.toThrow("nonempty draft");
+    await expect(f.invoke({ action: "list", workspacePath: "/repo" }, false)).rejects.toThrow("Unexpected automation list field");
     expect(f.emit).not.toHaveBeenCalled();
   });
 });

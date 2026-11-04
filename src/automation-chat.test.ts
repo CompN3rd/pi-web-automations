@@ -152,6 +152,83 @@ describe("host companion backend management boundary", () => {
     expect(f.resolve.mock.calls.map(([scope]) => scope.workspaceId)).toEqual(["z-current", "a-other", "empty-other", "inaccessible"]);
   });
 
+  it.each(["z-current", "a-other", "empty-other"])("lists only exact workspace %s despite unrelated stalled providers", async (workspaceId) => {
+    const f = await fixture("local");
+    f.targetIds.push("alias"); // An ambiguous cwd must not force discovery for an exact target.
+    f.projectsList.mockImplementation(() => new Promise(() => undefined));
+    f.workspacesList.mockImplementation(() => new Promise(() => undefined));
+    const resolve = f.resolve.getMockImplementation();
+    if (!resolve) throw new Error("Missing fixture resolver");
+    f.resolve.mockClear().mockImplementation((scope) => scope.workspaceId === workspaceId ? resolve(scope) : new Promise(() => undefined));
+    const input = { action: "list", projectId: `p-${workspaceId}`, workspaceId };
+    expect(f.validate?.(input)).toEqual(input);
+    const result = chatRecord((await f.query(input))["details"]);
+    expect(result).toMatchObject({ machine: { id: "local", name: hostname() }, unavailableWorkspaces: 0, workspaces: [
+      { project: { id: input.projectId }, workspace: { id: workspaceId }, definitions: workspaceId === "empty-other" ? [] : [{ name: `local-${workspaceId}`, revision: 1 }] },
+    ] });
+    expect(result["workspaces"]).toHaveLength(1);
+    expect(result).not.toHaveProperty("currentWorkspace"); // cwd alone is not scoped authority.
+    expect(f.projectsList).not.toHaveBeenCalled();
+    expect(f.workspacesList).not.toHaveBeenCalled();
+    expect(f.resolve).toHaveBeenCalledExactlyOnceWith({ projectId: input.projectId, workspaceId });
+    expect(f.createSession).not.toHaveBeenCalled();
+    expect(f.connect).not.toHaveBeenCalled();
+  });
+
+  it("re-resolves exact list authority on every call and fails rather than hiding revocation", async () => {
+    const f = await fixture("local");
+    const input = { action: "list", projectId: "p-z-current", workspaceId: "z-current" };
+    f.resolve.mockClear();
+    await f.query(input);
+    f.resolve.mockRejectedValue(new Error("Authority revoked"));
+    await expect(f.query(input)).rejects.toThrow("workspaces.resolve (project p-z-current, workspace z-current) failed: Authority revoked");
+    // A trusted current selection must not replace the requested scope on failure either.
+    await expect(f.request("a-other", "manage", input)).rejects.toThrow("Authority revoked");
+    expect(f.resolve).toHaveBeenCalledTimes(3);
+    expect(f.resolve.mock.calls.every(([scope]) => scope.projectId === input.projectId && scope.workspaceId === input.workspaceId)).toBe(true);
+    expect(f.projectsList).not.toHaveBeenCalled();
+    expect(f.workspacesList).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { projectId: "p-inaccessible", workspaceId: "inaccessible" },
+    { projectId: "p-z-current", workspaceId: "a-other" },
+  ])("rejects inaccessible or mismatched exact list target %j without cwd fallback", async (scope) => {
+    const f = await fixture("local");
+    f.resolve.mockClear();
+    await expect(f.query({ action: "list", ...scope })).rejects.toThrow("Not accessible");
+    expect(f.resolve).toHaveBeenCalledExactlyOnceWith(scope);
+    expect(f.projectsList).not.toHaveBeenCalled();
+    expect(f.workspacesList).not.toHaveBeenCalled();
+  });
+
+  it("reports a stalled requested list authority within the read budget without catalog fallback", async () => {
+    const f = await fixture("local");
+    vi.useFakeTimers();
+    const baselineTimers = vi.getTimerCount();
+    f.resolve.mockClear().mockImplementation(() => new Promise(() => undefined));
+    const pending = expect(f.query({ action: "list", projectId: "p-z-current", workspaceId: "z-current" })).rejects.toThrow("Automation list: workspaces.resolve (project p-z-current, workspace z-current) exceeded the 8000ms management read budget");
+    await vi.advanceTimersByTimeAsync(8000);
+    await pending;
+    expect(vi.getTimerCount()).toBe(baselineTimers);
+    expect(f.resolve).toHaveBeenCalledOnce();
+    expect(f.projectsList).not.toHaveBeenCalled();
+    expect(f.workspacesList).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { projectId: "p-z-current" }, { workspaceId: "z-current" },
+    { projectId: "", workspaceId: "z-current" }, { projectId: "p-z-current", workspaceId: null },
+    { projectId: 1, workspaceId: "z-current" }, { workspacePath: "/z-current" },
+  ])("validates malformed exact list %j at the backend before reads", async (scope) => {
+    const f = await fixture("local");
+    f.resolve.mockClear();
+    await expect(f.request("z-current", "manage", { action: "list", ...scope })).rejects.toThrow();
+    expect(f.resolve).not.toHaveBeenCalled();
+    expect(f.projectsList).not.toHaveBeenCalled();
+    expect(f.workspacesList).not.toHaveBeenCalled();
+  });
+
   it.each(["projects", "catalog workspaces", "authority"])("identifies a stalled %s read before the host deadline while the UI snapshot still works", async (stage) => {
     const f = await fixture("local");
     vi.useFakeTimers();
@@ -369,7 +446,7 @@ describe("host companion backend management boundary", () => {
     expect((await f.query({ action: "inspect", automationId: f.saved[0]?.["id"] }))["details"]).toMatchObject({ workspace: { id: "a-other" }, definition: { prompt: `Saved prompt ${machineId}-a-other` } });
     expect(f.connect).not.toHaveBeenCalled();
     await expect(f.query({ action: "inspect", automationId: f.saved[2]?.["id"] })).rejects.toThrow("not found");
-    await expect(f.query({ action: "list", workspaceId: "inaccessible" })).rejects.toThrow("Unexpected");
+    await expect(f.query({ action: "list", workspaceId: "inaccessible" })).rejects.toThrow("BOTH exact projectId/workspaceId");
   });
 
   it.each(["local", "remote-1"])("saves drafts and revision-guarded cross-workspace requirements on %s immediately", async (machineId) => {
