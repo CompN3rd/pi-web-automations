@@ -14,6 +14,9 @@ import {
   type AutomationTrigger,
 } from "./contracts.js";
 
+import { parseSessionArchiveSummary, type SessionArchiveSummary } from "./session-archive-result.js";
+import { chatRecord } from "./chat-protocol.js";
+
 export const ACTIVE_POLL_INTERVAL_MS = 2_000;
 export const IDLE_POLL_INTERVAL_MS = 15_000;
 const STATE_LIMIT = 8;
@@ -57,7 +60,9 @@ export interface AutomationPanelState {
   showArchived?: boolean;
   detailTab?: "overview" | "runs" | "configuration";
   workspaceActivity?: boolean;
-  confirmation?: { definition: AutomationDefinition; action: "archive" | "delete" };
+  confirmation?: { definition: AutomationDefinition; action: "archive" | "delete"; archiveSessions?: boolean };
+  sessionArchive?: { automationId: string; summary: SessionArchiveSummary; expectedRevision?: number; unconfirmedBatch?: string };
+  archiveCancellation?: AbortController;
   targets?: AutomationTarget[];
   targetError?: string;
   targetSequence: number;
@@ -282,12 +287,35 @@ export class AutomationsController {
     const confirmation = state.confirmation;
     if (!confirmation || state.mutating) return;
     if (confirmation.action === "delete") await this.delete(context, confirmation.definition);
-    else await this.setArchived(context, confirmation.definition, true);
-    if (state.error === undefined) delete state.confirmation;
+    else await this.setArchived(context, confirmation.definition, true, confirmation.archiveSessions === true);
+    delete state.confirmation;
     this.render(state);
   }
 
-  setArchived(context: WorkspacePanelContextV5, definition: AutomationDefinition, archived: boolean): Promise<void> {
+  setArchiveSessions(context: WorkspacePanelContextV5, checked: boolean): void {
+    const state = this.stateFor(context);
+    if (state.confirmation?.action === "archive") state.confirmation.archiveSessions = checked;
+    this.render(state);
+  }
+
+  async continueSessionArchive(context: WorkspacePanelContextV5): Promise<void> {
+    const state = this.stateFor(context);
+    const batch = state.sessionArchive;
+    if (!batch || batch.summary.traversalComplete || state.mutating) return;
+    await this.refresh(context);
+    if (state.error !== undefined || this.connectedKey !== contextKey(context)) return;
+    const definition = state.snapshot?.definitions.find((item) => item.id === batch.automationId);
+    if (definition?.archivedAt === undefined) { state.error = "Automation is no longer archived; session batch stopped"; this.render(state); return; }
+    if (batch.expectedRevision !== undefined && batch.expectedRevision !== definition.revision) { state.error = "Automation revision changed; inspect before starting a new archive pass"; this.render(state); return; }
+    await this.archiveRecordedSessions(context, definition, batch.summary.continuationAfter ?? "");
+  }
+
+  stopSessionArchive(context: WorkspacePanelContextV5): void {
+    this.stateFor(context).archiveCancellation?.abort(new Error("Session archive stopped by user; inspect before retrying"));
+  }
+
+  setArchived(context: WorkspacePanelContextV5, definition: AutomationDefinition, archived: boolean, archiveSessions = false): Promise<void> {
+    if (archived && archiveSessions) return this.archiveRecordedSessions(context, definition);
     return this.mutate(context, {
       action: archived ? "archive" : "restore", automationId: definition.id, expectedRevision: definition.revision,
     }, archived ? "Automation archived; sessions retained" : "Automation restored with schedule paused");
@@ -305,6 +333,78 @@ export class AutomationsController {
     }, "Cancellation requested; inspect for settlement");
   }
 
+  private async archiveRecordedSessions(context: WorkspacePanelContextV5, definition: AutomationDefinition, after?: string): Promise<void> {
+    const state = this.stateFor(context);
+    if (state.mutating) return;
+    const cancellation = new AbortController();
+    state.archiveCancellation = cancellation;
+    state.mutating = true;
+    state.error = undefined;
+    state.notice = "Archiving recorded sessions automatically…";
+    if (after === undefined) {
+      const unconfirmedBatch = state.sessionArchive?.automationId === definition.id ? state.sessionArchive.unconfirmedBatch : undefined;
+      state.sessionArchive = { automationId: definition.id, summary: { results: [], traversalComplete: false, continuationAfter: "" },
+        ...(unconfirmedBatch !== undefined ? { unconfirmedBatch } : {}) };
+    }
+    this.render(state);
+    let cursor = after;
+    let revision = definition.revision;
+    const visited = new Set<string>([after ?? ""]);
+    try {
+      const peer = context.backend?.forScope({ kind: "workspace", projectId: context.workspace.projectId, workspaceId: context.workspace.id });
+      if (!peer?.request) throw new Error("Automations backend is unavailable on this machine");
+      for (;;) {
+        cancellation.signal.throwIfAborted();
+        const response = chatRecord(await peer.request("manage", { action: "archive", automationId: definition.id, expectedRevision: revision,
+          archiveSessions: true, ...(cursor !== undefined ? { archiveSessionAfter: cursor } : {}) }, { signal: cancellation.signal }));
+        cancellation.signal.throwIfAborted();
+        if (this.connectedKey !== contextKey(context)) return;
+        parseManagementResult(response);
+        if (response["automationId"] !== definition.id) throw new Error("Invalid session archive management response");
+        const saved = chatRecord(response["definition"]);
+        if (saved["id"] !== definition.id || typeof saved["revision"] !== "number" || !Number.isSafeInteger(saved["revision"])
+          || typeof saved["archivedAt"] !== "string") throw new Error("Invalid archived definition response");
+        revision = saved["revision"];
+        const summary = parseSessionArchiveSummary(response["sessionArchive"]);
+        const aggregate = new Map(state.sessionArchive?.summary.results.map((result) => [result.sessionId, result]));
+        for (const result of summary.results) aggregate.set(result.sessionId, result);
+        const unconfirmedBatch = state.sessionArchive?.unconfirmedBatch;
+        state.sessionArchive = { automationId: definition.id, expectedRevision: revision, summary: { ...summary, results: [...aggregate.values()] },
+          ...(!summary.traversalComplete && unconfirmedBatch !== undefined ? { unconfirmedBatch } : {}) };
+        state.showArchived = true;
+        state.selectedId = definition.id;
+        state.notice = summary.traversalComplete ? "Automation archived and schedule paused. Session traversal finished; review aggregate outcomes below." : "Archiving recorded sessions automatically…";
+        this.render(state);
+        if (summary.traversalComplete) break;
+        if (summary.stopReason && summary.stopReason !== "budget") {
+          state.notice = `Session archive stopped (${summary.stopReason}); remaining sessions were not attempted. Inspect before continuing or retrying.`;
+          break;
+        }
+        const next = summary.continuationAfter;
+        if (next === undefined || visited.has(next)) {
+          state.notice = "Session archive stopped without cursor progress; remaining sessions were not attempted. Inspect before retrying.";
+          break;
+        }
+        visited.add(next);
+        cursor = next;
+      }
+    } catch (error) {
+      state.error = `${errorMessage(error)}. The latest batch may already have occurred; its outcomes are unconfirmed. Inspect before retrying. Earlier aggregate results are retained.`;
+      if (state.sessionArchive !== undefined) state.sessionArchive.unconfirmedBatch = state.error;
+      state.notice = "Session archive stopped; no further batches will be sent.";
+    } finally {
+      delete state.archiveCancellation;
+      state.mutating = false;
+      if (this.connectedKey === contextKey(context)) {
+        const error = state.error;
+        this.detachRequest(state);
+        await this.refresh(context);
+        if (error !== undefined) state.error = error;
+        this.render(state);
+      }
+    }
+  }
+
   private async mutate(context: WorkspacePanelContextV5, input: JsonValue, notice: string): Promise<void> {
     const state = this.stateFor(context);
     if (state.mutating) return;
@@ -315,14 +415,19 @@ export class AutomationsController {
     try {
       const peer = context.backend?.forScope({ kind: "workspace", projectId: context.workspace.projectId, workspaceId: context.workspace.id });
       if (peer?.request === undefined) throw new Error("Automations backend is unavailable on this machine");
-      parseManagementResult(await peer.request("manage", input));
+      const response = await peer.request("manage", input);
+      parseManagementResult(response);
       if (this.connectedKey !== contextKey(context)) return;
       state.notice = notice;
       this.clearTimer();
       this.detachRequest(state);
       await this.refresh(context);
     } catch (error) {
-      if (this.connectedKey === contextKey(context)) state.error = errorMessage(error);
+      if (this.connectedKey === contextKey(context)) {
+        this.detachRequest(state);
+        await this.refresh(context);
+        state.error = `${errorMessage(error)}. The action may already have occurred; refresh was attempted. Inspect current state before explicitly retrying.`;
+      }
     } finally {
       state.mutating = false;
       if (this.connectedKey === contextKey(context)) this.render(state);
@@ -353,7 +458,7 @@ export class AutomationsController {
   private invalidateConnectedRequest(): void {
     if (this.connectedKey === undefined) return;
     const state = this.states.get(this.connectedKey);
-    if (state !== undefined) this.detachRequest(state);
+    if (state !== undefined) { state.archiveCancellation?.abort(new Error("Session archive view disconnected; inspect before retrying")); this.detachRequest(state); delete state.confirmation; }
   }
 
   private detachRequest(state: AutomationPanelState): void {

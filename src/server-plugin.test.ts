@@ -21,7 +21,8 @@ function fixture() {
     const values: Record<string, unknown> = {
       "pi-sessions": { version: 1, create: () => Promise.resolve({ sessionId: "session-1" }), run: () => Promise.reject(new Error("unused")) },
       "pi-session-events": { version: 1, connect: () => Promise.reject(new Error("companion connection unavailable")) },
-      catalog: { version: 1, projects: { list: () => Promise.resolve([]), get: vi.fn() }, workspaces: { list: () => Promise.resolve([]), get: vi.fn() }, sessions: { list: () => Promise.resolve([]), get: vi.fn() } },
+      "session-lifecycle": { version: 1, get: vi.fn(), archive: vi.fn(), restore: vi.fn(), delete: vi.fn(), pin: vi.fn(), unpin: vi.fn() },
+    catalog: { version: 1, projects: { list: () => Promise.resolve([]), get: vi.fn() }, workspaces: { list: () => Promise.resolve([]), get: vi.fn() }, sessions: { list: () => Promise.resolve([]), get: vi.fn() } },
       workspaces: { version: 1, resolve: () => Promise.resolve({ project: { id: "p", name: "P", path: "/repo" }, workspace: { id: "w", projectId: "p", label: "main", path: "/repo", isMain: true } }) },
     };
     return capability.parse(values[capability.id]);
@@ -34,10 +35,10 @@ describe("Automations server plugin API v5 lifecycle", () => {
     vi.useFakeTimers();
     const f = fixture(); const activation = await plugin.activate(f.context);
     expect(plugin.apiVersion).toBe(5);
-    expect(plugin.requires?.map((entry) => `${entry.id}@${String(entry.version)}`)).toEqual(["pi-sessions@1", "pi-session-events@1", "workspaces@1", "catalog@1"]);
+    expect(plugin.requires?.map((entry) => `${entry.id}@${String(entry.version)}`)).toEqual(["pi-sessions@1", "pi-session-events@1", "workspaces@1", "catalog@1", "session-lifecycle@1"]);
     expect(existsSync(join(f.context.dataDirectory, "automations.sqlite"))).toBe(false);
     await activation.start?.({ capabilities: f.capabilities, signal: new AbortController().signal });
-    expect(f.resolved).toEqual(["pi-sessions", "pi-session-events", "workspaces", "catalog"]);
+    expect(f.resolved).toEqual(["pi-sessions", "pi-session-events", "workspaces", "catalog", "session-lifecycle"]);
     expect(existsSync(join(f.context.dataDirectory, "automations.sqlite"))).toBe(true);
     expect(await activation.health?.(f.context.signal)).toEqual({ status: "healthy" });
     expect(await activation.peer?.request?.(f.request)).toMatchObject({ ok: true });

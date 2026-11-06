@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+const signalMatcher: unknown = expect.any(AbortSignal);
+
 import type { JsonValue, WorkspacePanelContextV5 } from "@jmfederico/pi-web/plugin-api";
 import { html, render, svg } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -127,16 +129,24 @@ describe("standalone Automations browser plugin", () => {
       container.querySelectorAll<HTMLButtonElement>(".automation-list-item")[0]?.click(); await redraw();
       await click("Archive");
       expect(backend.mock.calls.filter(([operation]) => operation === "manage")).toHaveLength(0);
-      expect(container.querySelector(".lifecycle-confirmation")?.textContent).toContain("Sessions are retained");
+      expect(container.querySelector(".lifecycle-confirmation")?.textContent).toContain("Sessions remain saved");
+      const checkbox = container.querySelector<HTMLInputElement>('.lifecycle-confirmation input[type="checkbox"]');
+      expect(checkbox?.checked).toBe(false);
+      expect(checkbox?.closest("label")?.textContent).toContain("Also archive this automation’s sessions");
+      if (!checkbox) throw new Error("Missing archive checkbox");
+      checkbox.checked = true; checkbox.dispatchEvent(new Event("change", { bubbles: true })); await redraw();
       await click("Cancel");
       expect(container.querySelector(".lifecycle-confirmation")).toBeNull();
+      await click("Archive");
+      expect(container.querySelector<HTMLInputElement>('.lifecycle-confirmation input[type="checkbox"]')?.checked).toBe(false);
+      await click("Cancel");
       await click("Archive"); await click("Confirm archive");
       expect(backend).toHaveBeenCalledWith("manage", { action: "archive", automationId: "created", expectedRevision: 1 });
       expect(container.querySelectorAll(".automation-list-item")).toHaveLength(1);
       await click("Archived · 2");
       expect(container.querySelectorAll(".automation-list-item")).toHaveLength(2);
       expect(container.querySelector(".definition-card h3")?.textContent).toBe("Fixed job");
-      expect([...container.querySelectorAll(".definition-actions button")].map((button) => button.textContent.trim())).toEqual(["Restore paused", "Delete"]);
+      expect([...container.querySelectorAll(".definition-actions button")].map((button) => button.textContent.trim())).toEqual(["Restore paused", "Archive sessions / retry", "Delete"]);
       await click("Restore paused");
       expect(backend).toHaveBeenCalledWith("manage", { action: "restore", automationId: "created", expectedRevision: 2 });
       await click("Current · 2");
@@ -144,6 +154,92 @@ describe("standalone Automations browser plugin", () => {
       expect(container.querySelector(".lifecycle-confirmation")?.textContent).toContain("cannot be undone");
       await click("Confirm delete");
       expect(backend).toHaveBeenCalledWith("manage", { action: "delete", automationId: "created", expectedRevision: 3 });
+    } finally { render(null, container); }
+  });
+
+  it("one checked confirmation automatically archives multiple sessions and displays aggregate outcomes in Archived", async () => {
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const panel = activation.contributions.workspacePanels?.[0]; if (!panel) throw new Error("Missing panel");
+    let definition = fixedDefinition();
+    let batches = 0;
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>((operation) => {
+      if (operation !== "manage") return Promise.resolve(successSnapshot([definition]));
+      batches++;
+      definition = fixedDefinition({ revision: 2, archivedAt: "2026-01-02T00:00:00Z" });
+      return Promise.resolve({ ...managementSuccess, automationId: "created", definition, sessionArchive: batches === 1
+        ? { results: [{ sessionId: "session-A", status: "archived" }, { sessionId: "exact-session-full", status: "uncertain", detail: "Reply lost" }], traversalComplete: false, continuationAfter: "exact-session-full" }
+        : { results: [{ sessionId: "session-B", status: "archived" }, { sessionId: "session-C", status: "failed", detail: "Missing" }], traversalComplete: true } });
+    });
+    const context = panelContext(backend); const container = document.createElement("div"); document.body.append(container);
+    const redraw = async () => { await settle(); render(panel.render(context), container); };
+    const click = async (text: string) => {
+      const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent.trim() === text);
+      if (!button) throw new Error(`Missing ${text}`); button.click(); await redraw();
+    };
+    try {
+      await redraw(); await redraw(); await click("Archive");
+      const checkbox = container.querySelector<HTMLInputElement>('.lifecycle-confirmation input[type="checkbox"]');
+      if (!checkbox) throw new Error("Missing checkbox");
+      checkbox.checked = true; checkbox.dispatchEvent(new Event("change", { bubbles: true })); await redraw();
+      await click("Confirm archive"); await redraw(); await redraw();
+      expect(backend).toHaveBeenCalledWith("manage", { action: "archive", automationId: "created", expectedRevision: 1, archiveSessions: true }, { signal: signalMatcher });
+      expect(container.querySelector('[aria-label="Session archive batch results"]')?.textContent).toContain("exact-session-full: uncertain — Reply lost");
+      expect(container.querySelector(".definition-card h3")?.textContent).toBe("Fixed job");
+      expect(container.textContent).toContain("4 recorded session outcomes · 2 confirmed archived · 0 skipped · 2 need attention");
+      expect(container.textContent).not.toContain("Continue remaining sessions");
+      expect(batches).toBe(2);
+      await click("Archive sessions / retry");
+      expect(container.querySelector<HTMLInputElement>('.lifecycle-confirmation input[type="checkbox"]')?.checked).toBe(false);
+    } finally { render(null, container); }
+  });
+
+  it.each([1, 2])("keeps lost batch %i uncertainty visible after successful snapshot refresh until explicit reconciliation", async (lostBatch) => {
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const panel = activation.contributions.workspacePanels?.[0]; if (!panel) throw new Error("Missing panel");
+    let definition = fixedDefinition();
+    let batches = 0;
+    let reconciling = false;
+    const archivedSessions = new Set<string>();
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>((operation) => {
+      if (operation !== "manage") return Promise.resolve(successSnapshot([definition]));
+      batches++;
+      definition = fixedDefinition({ revision: 2, archivedAt: "2026-01-02T00:00:00Z" });
+      if (reconciling) return Promise.resolve({ ...managementSuccess, automationId: "created", definition,
+        sessionArchive: { results: [...archivedSessions].map((sessionId) => ({ sessionId, status: "already-archived" })), traversalComplete: true } });
+      const sessionId = batches === 1 ? "session-A" : "session-B";
+      archivedSessions.add(sessionId);
+      if (batches === lostBatch) return Promise.reject(new Error("Reply lost after host admission"));
+      return Promise.resolve({ ...managementSuccess, automationId: "created", definition,
+        sessionArchive: { results: [{ sessionId, status: "archived" }], traversalComplete: false, continuationAfter: sessionId } });
+    });
+    const context = panelContext(backend); const container = document.createElement("div"); document.body.append(container);
+    const redraw = async () => { await settle(); render(panel.render(context), container); };
+    const click = async (text: string) => {
+      const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent.trim() === text);
+      if (!button) throw new Error(`Missing ${text}`); button.click(); await redraw();
+    };
+    try {
+      await redraw(); await redraw(); await click("Archive");
+      const checkbox = container.querySelector<HTMLInputElement>('.lifecycle-confirmation input[type="checkbox"]');
+      if (!checkbox) throw new Error("Missing checkbox");
+      checkbox.checked = true; checkbox.dispatchEvent(new Event("change", { bubbles: true })); await redraw();
+      await click("Confirm archive");
+      for (let index = 0; index < 8; index++) await redraw();
+      expect(archivedSessions.size).toBe(lostBatch);
+      await panel.onInvalidate?.(context); await redraw();
+      expect(container.querySelector(".message.error")).toBeNull();
+      const results = container.querySelector('[aria-label="Session archive batch results"]');
+      expect(results?.textContent).toContain("outcomes are unconfirmed");
+      expect(results?.textContent).toContain("Sessions in the unconfirmed batch may already be archived");
+      expect(results?.textContent).not.toContain("remaining sessions were not attempted");
+      if (lostBatch === 2) expect(results?.textContent).toContain("session-A: archived");
+      expect(batches).toBe(lostBatch);
+      reconciling = true;
+      await click("Continue remaining sessions");
+      for (let index = 0; index < 8; index++) await redraw();
+      expect(container.querySelector('[aria-label="Session archive batch results"]')?.textContent).not.toContain("outcomes are unconfirmed");
+      expect(container.textContent).toContain("Traversal finished");
+      expect(batches).toBe(lostBatch + 1);
     } finally { render(null, container); }
   });
 

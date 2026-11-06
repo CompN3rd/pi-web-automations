@@ -41,9 +41,17 @@ try {
   assert.equal(tools[0].exposure, "deferred");
   await assert.rejects(() => tools[0].execute("smoke", { action: "list" }, undefined, undefined, { cwd: directory }), /No local fallback/);
   const required = plugin.requires.map(({ pluginId, id, version }) => `${pluginId}:${id}@${version}`);
-  if (required.join(",") !== "pi-web.host:pi-sessions@1,pi-web.host:pi-session-events@1,pi-web.host:workspaces@1,pi-web.host:catalog@1") {
+  if (required.join(",") !== "pi-web.host:pi-sessions@1,pi-web.host:pi-session-events@1,pi-web.host:workspaces@1,pi-web.host:catalog@1,pi-web.host:session-lifecycle@1") {
     throw new Error("Packaged plugin lost its exact host capability requirements");
   }
+  assert.equal(manifest.peerDependencies["@jmfederico/pi-web"], "^1.202611.0");
+  const lifecycle = plugin.requires.find(({ id }) => id === "session-lifecycle");
+  let archivedTarget;
+  const archive = async (target) => { archivedTarget = target; };
+  const parsedLifecycle = lifecycle.parse({ version: 1, get: async () => ({ sessionId: "exact", archived: false, pinned: false }), archive, restore: archive, delete: archive, pin: archive, unpin: archive });
+  await parsedLifecycle.archive({ projectId: "p", workspaceId: "w", sessionId: "exact" });
+  assert.deepEqual(archivedTarget, { projectId: "p", workspaceId: "w", sessionId: "exact" });
+  assert.deepEqual(await parsedLifecycle.get({ projectId: "p", workspaceId: "w", sessionId: "exact" }), { sessionId: "exact", archived: false, pinned: false });
   for (const capability of plugin.requires) {
     assert.throws(() => capability.parse({ version: 2 }), `Packaged capability ${capability.id} must reject invalid values`);
   }

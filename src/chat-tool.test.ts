@@ -44,7 +44,7 @@ describe("automations chat-tool schema and action validation", () => {
     expect(exposure).toBe("deferred");
     expect(declaration).not.toContain("args: unknown");
     expect(declaration).toContain('action: "list" | "inspect" | "create" | "update" | "run" | "enable" | "pause" | "archive" | "restore" | "delete" | "cancel"');
-    for (const field of ["automationId", "expectedRevision", "draft", "patch", "runId", "projectId", "workspaceId"]) expect(declaration).toContain(`${field}?:`);
+    for (const field of ["automationId", "expectedRevision", "draft", "patch", "runId", "projectId", "workspaceId", "archiveSessions", "archiveSessionAfter"]) expect(declaration).toContain(`${field}?:`);
     for (const field of ["name", "prompt", "trigger", "model", "thinking"]) expect(declaration).toContain(`${field}:`);
     expect(declaration).toContain("required for update/run/enable/pause/archive/restore/delete");
     expect(declaration).toContain("Required for create only");
@@ -63,6 +63,8 @@ describe("automations chat-tool schema and action validation", () => {
     { action: "update", automationId: "id", expectedRevision: 1, patch: { prompt: "Edited" } },
     ...["run", "enable", "pause", "archive", "restore", "delete"].map((action) => ({ action, automationId: "id", expectedRevision: 1 })),
     { action: "cancel", automationId: "id", runId: "run" },
+    { action: "archive", automationId: "id", expectedRevision: 1, archiveSessions: true, archiveSessionAfter: "full-session-id" },
+    { action: "archive", automationId: "id", expectedRevision: 1, archiveSessions: false },
   ])("validates and forwards $action with exact fields to the hosted machine", async (input) => {
     const f = fixture();
     await f.invoke(input);
@@ -73,6 +75,8 @@ describe("automations chat-tool schema and action validation", () => {
   });
 
   it.each<[Record<string, JsonValue>, string]>([
+    ...["restore", "delete", "inspect", "run", "pause", "enable", "create", "list", "update", "cancel"].map((action): [Record<string, JsonValue>, string] => [{ action, automationId: "id", expectedRevision: 1, archiveSessions: true }, "Unexpected"]),
+    [{ action: "archive", automationId: "id", expectedRevision: 1, archiveSessionAfter: "id" }, "archiveSessionAfter requires"],
     [{ action: "inspect" }, "inspect requires automationId"],
     [{ action: "create" }, "create requires draft"],
     [{ action: "update", automationId: "id" }, "update requires expectedRevision"],
@@ -105,6 +109,8 @@ describe("automations chat-tool schema and action validation", () => {
 
   it("checks revisions and objects even when a caller bypasses schema validation", async () => {
     const f = fixture();
+    await expect(f.invoke({ action: "archive", automationId: "id", expectedRevision: 1, archiveSessions: "yes" }, false)).rejects.toThrow("archiveSessions must be boolean");
+    await expect(f.invoke({ action: "archive", automationId: "id", expectedRevision: 1, archiveSessions: true, archiveSessionAfter: 3 }, false)).rejects.toThrow("archiveSessionAfter requires");
     for (const expectedRevision of [0, 1.5, Number.MAX_SAFE_INTEGER + 1, "1"]) {
       await expect(f.invoke({ action: "run", automationId: "id", expectedRevision }, false)).rejects.toThrow("positive safe integer");
     }

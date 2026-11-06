@@ -14,9 +14,13 @@ export function validateAutomationAction(value: unknown): Record<string, unknown
     : ["run", "enable", "pause", "archive", "restore", "delete"].includes(action) ? ["automationId", "expectedRevision"]
     : action === "cancel" ? ["automationId", "runId"] : undefined;
   if (!required) throw new Error("Use list, inspect, create, update, run, enable, pause, archive, restore, delete, or cancel");
-  const allowed = ["action", ...required, ...(["list", "create"].includes(action) ? ["projectId", "workspaceId"] : [])];
+  const allowed = ["action", ...required, ...(action === "archive" ? ["archiveSessions", "archiveSessionAfter"] : []), ...(["list", "create"].includes(action) ? ["projectId", "workspaceId"] : [])];
   const unexpected = Object.keys(input).find((key) => !allowed.includes(key));
   if (unexpected !== undefined) throw new Error(`Unexpected automation ${action} field: ${unexpected}`);
+  if (input["archiveSessions"] !== undefined && typeof input["archiveSessions"] !== "boolean") throw new Error("archiveSessions must be boolean");
+  if (input["archiveSessionAfter"] !== undefined) {
+    if (input["archiveSessions"] !== true || typeof input["archiveSessionAfter"] !== "string" || input["archiveSessionAfter"].length > 512) throw new Error("archiveSessionAfter requires archiveSessions: true and an exact continuation cursor");
+  }
   for (const field of required) {
     if (input[field] === undefined) throw new Error(`Automation ${action} requires ${field}`);
   }

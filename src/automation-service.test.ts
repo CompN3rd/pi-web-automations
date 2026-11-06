@@ -133,6 +133,20 @@ describe("AutomationService", () => {
     expect(service.inspect(definition.id, scope)).toEqual(before);
   });
 
+  it("revalidates archived revision and scope for each session page, including restored/deleted definitions", () => {
+    const { service, store } = fixture(); const definition = service.create(scope, draft());
+    expect(() => service.sessionArchivePage(definition.id, scope, 1)).toThrow("current archived revision");
+    const archived = service.setArchived(definition.id, scope, 1, true);
+    expect(service.sessionArchivePage(definition.id, scope, archived.revision)).toEqual([]);
+    expect(() => service.sessionArchivePage(definition.id, scope, 1)).toThrow("current archived revision");
+    expect(() => service.sessionArchivePage(definition.id, { ...scope, projectId: "wrong" }, archived.revision)).toThrow("not found");
+    const restored = service.setArchived(definition.id, scope, archived.revision, false);
+    expect(() => service.sessionArchivePage(definition.id, scope, restored.revision)).toThrow("current archived revision");
+    service.delete(definition.id, scope, restored.revision);
+    expect(() => service.sessionArchivePage(definition.id, scope, restored.revision)).toThrow("not found");
+    expect(store.listRuns(scope.projectId, scope.workspaceId)).toEqual([]);
+  });
+
   it("blocks archive for active and unknown work and preserves untested status", () => {
     vi.useFakeTimers();
     const { service, store } = fixture();

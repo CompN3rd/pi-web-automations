@@ -255,6 +255,13 @@ export class AutomationService {
     }
   }
 
+  sessionArchivePage(id: string, scope: AutomationScope, expectedRevision: number, after?: string): string[] {
+    const definition = this.requireDefinition(id, scope);
+    if (definition.revision !== expectedRevision || definition.archivedAt === undefined) throw new AutomationServiceError("Session archiving requires the current archived revision; inspect before retrying", 409);
+    if (this.store.hasActiveRun(id) || this.store.hasUnknownRun(id)) throw new AutomationServiceError("Cannot archive sessions with active or unconfirmed work", 409);
+    return this.store.sessionArchivePage(id, scope.projectId, scope.workspaceId, after);
+  }
+
   delete(id: string, scope: AutomationScope, expectedRevision: number): void {
     const definition = this.requireDefinition(id, scope);
     if (definition.revision !== expectedRevision) throw new AutomationServiceError("Automation was changed by another client", 409);

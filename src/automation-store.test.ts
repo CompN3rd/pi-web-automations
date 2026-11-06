@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AutomationDefinition, AutomationUsageSnapshot } from "./server/contracts.js";
+import { RuntimeDatabase } from "./server/sqlite.js";
 import { AutomationStore } from "./server/automation-store.js";
 
 const stores: AutomationStore[] = [];
@@ -131,6 +132,47 @@ describe("AutomationStore", () => {
     expect(db.costStatistics("project-1", "workspace-1")).toEqual([{ automationId: automation.id, count: 202, priced: 201, totalMicros: 20000 }]);
     expect(db.costStatistics("other", "workspace-1")).toEqual([]);
     expect(db.costStatistics("project-1", "other")).toEqual([]);
+  });
+
+  it("pages distinct exact scoped sessions across more than 500 runs and absent IDs", () => {
+    const db = store();
+    const automation = db.insertDefinition(definition());
+    const other = db.insertDefinition(definition({ id: "other", name: "Other", projectId: "other-project" }));
+    const at = automation.createdAt;
+    for (let i = 0; i < 505; i++) {
+      const id = `run-${String(i)}`;
+      const queuedAt = new Date(Date.parse(at) + i * 1000).toISOString();
+      db.createManualRun(automation, id, queuedAt);
+      db.markRunStarting(id, `attempt-${id}`, at);
+      if (i < 2) db.recordSession(id, "A-exact-old-session");
+      db.finishRun(id, { status: "completed", completedAt: at });
+    }
+    db.createManualRun(other, "other-run", at); db.recordSession("other-run", "must-not-archive");
+    expect(db.listRuns(automation.projectId, automation.workspaceId, { automationId: automation.id, limit: 9999 })).toHaveLength(500);
+    expect(db.listRuns(automation.projectId, automation.workspaceId, { automationId: automation.id, limit: 500 }).every((run) => run.sessionId === undefined)).toBe(true);
+    expect(db.sessionArchivePage(automation.id, automation.projectId, automation.workspaceId)).toEqual(["A-exact-old-session"]);
+    expect(db.sessionArchivePage(automation.id, automation.projectId, automation.workspaceId, "A-exact-old-session")).toEqual([]);
+    expect(db.sessionArchivePage(automation.id, automation.projectId, automation.workspaceId, "C-extra-attempt")).toEqual([]);
+    expect(db.sessionArchivePage(automation.id, "other-project", automation.workspaceId)).toEqual([]);
+    expect(db.sessionArchivePage(automation.id, automation.projectId, "other-workspace")).toEqual([]);
+  });
+
+  it("includes identities unique to any retained attempt", () => {
+    const root = mkdtempSync(join(tmpdir(), "archive-attempts-")); tempRoots.push(root);
+    const path = join(root, "fixture.sqlite");
+    const db = new AutomationStore(path); stores.push(db);
+    const automation = db.insertDefinition(definition());
+    db.createManualRun(automation, "run", automation.createdAt);
+    db.markRunStarting("run", "attempt", automation.createdAt);
+    db.recordSession("run", "A-run-session");
+    const fixture = new RuntimeDatabase(path);
+    fixture.transaction(() => {
+      fixture.prepare("UPDATE automation_attempts SET session_id = ? WHERE id = ?").run("B-attempt-only", "attempt");
+      fixture.prepare("INSERT INTO automation_attempts(id, run_id, attempt_number, status, session_id) VALUES (?, ?, ?, ?, ?)").run("earlier-attempt", "run", 2, "completed", "C-extra-attempt");
+    })();
+    fixture.close();
+    expect(db.sessionArchivePage(automation.id, automation.projectId, automation.workspaceId)).toEqual(["A-run-session", "B-attempt-only"]);
+    expect(db.sessionArchivePage(automation.id, automation.projectId, automation.workspaceId, "A-run-session")).toEqual(["B-attempt-only", "C-extra-attempt"]);
   });
 
   it("uses the host-selected database path without a plugin owner file", () => {

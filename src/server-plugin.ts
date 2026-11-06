@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { PI_WEB_HOST_CATALOG_CAPABILITY, PI_WEB_HOST_PI_SESSIONS_CAPABILITY, PI_WEB_HOST_PI_SESSION_EVENTS_CAPABILITY, PI_WEB_HOST_WORKSPACES_CAPABILITY } from "@jmfederico/pi-web/server-plugin-api";
+import { PI_WEB_HOST_SESSION_LIFECYCLE_CAPABILITY, PI_WEB_HOST_CATALOG_CAPABILITY, PI_WEB_HOST_PI_SESSIONS_CAPABILITY, PI_WEB_HOST_PI_SESSION_EVENTS_CAPABILITY, PI_WEB_HOST_WORKSPACES_CAPABILITY } from "@jmfederico/pi-web/server-plugin-api";
 import type { PiWebServerPluginV5, ServerPluginActivationV5, ServerPluginActivationContextV5 } from "@jmfederico/pi-web/server-plugin-api";
 import { chatRecord } from "./browser/chat-protocol.js";
 import { AutomationChat } from "./server/automation-chat.js";
@@ -11,7 +11,7 @@ import { AutomationStore } from "./server/automation-store.js";
 const plugin: PiWebServerPluginV5 = {
   apiVersion: 5,
   name: "Automations",
-  requires: [PI_WEB_HOST_PI_SESSIONS_CAPABILITY, PI_WEB_HOST_PI_SESSION_EVENTS_CAPABILITY, PI_WEB_HOST_WORKSPACES_CAPABILITY, PI_WEB_HOST_CATALOG_CAPABILITY],
+  requires: [PI_WEB_HOST_PI_SESSIONS_CAPABILITY, PI_WEB_HOST_PI_SESSION_EVENTS_CAPABILITY, PI_WEB_HOST_WORKSPACES_CAPABILITY, PI_WEB_HOST_CATALOG_CAPABILITY, PI_WEB_HOST_SESSION_LIFECYCLE_CAPABILITY],
   activate: createAutomationActivation,
 };
 export default plugin;
@@ -61,7 +61,7 @@ export function createAutomationActivation(context: ServerPluginActivationContex
         store = new AutomationStore(join(context.dataDirectory, "automations.sqlite"));
         service = new AutomationService(store, new AutomationSessionRunner(sessions, events, workspaces, context.lifetimeSignal), pluginLogger(context));
         service.start();
-        chat = new AutomationChat(service, workspaces, capabilities.resolve(PI_WEB_HOST_CATALOG_CAPABILITY), context.lifetimeSignal);
+        chat = new AutomationChat(service, workspaces, capabilities.resolve(PI_WEB_HOST_CATALOG_CAPABILITY), context.lifetimeSignal, capabilities.resolve(PI_WEB_HOST_SESSION_LIFECYCLE_CAPABILITY));
         phase = "ready";
       } catch (error) {
         phase = "failed";

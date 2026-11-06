@@ -309,6 +309,22 @@ export class AutomationStore {
     return rows.map((row) => this.runFromRow(row));
   }
 
+  /** Exact retained identities, including every attempt, independent of the UI history cap. */
+  sessionArchivePage(automationId: string, projectId: string, workspaceId: string, after = ""): string[] {
+    return this.db.prepare<[string, string, string, string], { sessionId: string }>(`
+      WITH scoped_runs AS (
+        SELECT id, session_id FROM automation_runs
+        WHERE automation_id = ? AND project_id = ? AND workspace_id = ?
+      ), identities AS (
+        SELECT session_id FROM scoped_runs
+        UNION SELECT a.session_id FROM automation_attempts a JOIN scoped_runs r ON r.id = a.run_id
+      )
+      SELECT session_id AS sessionId FROM identities
+      WHERE session_id IS NOT NULL AND session_id > ?
+      ORDER BY session_id COLLATE BINARY LIMIT 2
+    `).all(automationId, projectId, workspaceId, after).map((row) => row.sessionId);
+  }
+
   costStatistics(projectId: string, workspaceId: string): { automationId: string; count: number; priced: number; totalMicros: number }[] {
     return this.db.prepare<[string, string], { automationId: string; count: number; priced: number; totalMicros: number }>(`
       SELECT automation_id AS automationId, COUNT(*) AS count,

@@ -1,17 +1,20 @@
 import { hostname } from "node:os";
-import type { PiWebHostWorkspacesV1, PluginCatalogV1 } from "@jmfederico/pi-web/server-plugin-api";
+import type { PiWebHostWorkspacesV1, PluginCatalogV1, PluginSessionLifecycleV1 } from "@jmfederico/pi-web/server-plugin-api";
 import { chatRecord, chatString, validateAutomationAction } from "../browser/chat-protocol.js";
 import type { AutomationService } from "./automation-service.js";
+import { SessionArchiver } from "./session-archive.js";
 import { parseDraft, parsePatch } from "./automation-backend.js";
 
 /** Shared machine-local management, with fresh host authority before every mutation. */
 export class AutomationChat {
+  private readonly archiver: SessionArchiver;
   constructor(
     private readonly service: AutomationService,
     private readonly workspaces: PiWebHostWorkspacesV1,
     private readonly catalog: PluginCatalogV1,
     private readonly lifetime: AbortSignal,
-  ) {}
+    lifecycle: PluginSessionLifecycleV1,
+  ) { this.archiver = new SessionArchiver(catalog, lifecycle); }
 
   async query(current: WorkspaceSelection | undefined, data: unknown, signal: AbortSignal, currentWorkspacePath?: unknown) {
     const input = validateAutomationAction(data);
@@ -117,11 +120,18 @@ export class AutomationChat {
       }
       if (action === "archive" || action === "restore") {
         const saved = perform(() => this.service.setArchived(automationId, target, revision, action === "archive"));
-        return { ...result, definition: saved, message: action === "archive" ? "Automation archived and schedule paused. Sessions and run history retained." : "Automation restored with schedule paused. Sessions unchanged." };
+        const after = typeof input["archiveSessionAfter"] === "string" ? input["archiveSessionAfter"] : undefined;
+        const sessionArchive = action === "archive" && input["archiveSessions"] === true
+          ? await this.archiver.batch(automationId, storedScope,
+            (cursor) => this.service.sessionArchivePage(automationId, target, saved.revision, cursor),
+            signal, reads.deadline, after) : undefined;
+        return { ...result, definition: saved, ...(sessionArchive ? { sessionArchive } : {}), message: sessionArchive
+          ? `Automation archived and schedule paused. ${String(sessionArchive.results.length)} session outcomes in this bounded pass. ${sessionArchive.traversalComplete ? "All recorded identities visited." : `Partial traversal (${sessionArchive.stopReason ?? "50-session batch limit"}); remaining identities were not attempted. Continue with archiveSessionAfter and this definition revision only after reviewing any timeout/cancellation/blocked outcome.`} Traversal completion is not all-success: review skipped/failed/uncertain outcomes separately. Retry from the start to recheck them; no automatic retries. Sessions remain saved.`
+          : action === "archive" ? "Automation archived and schedule paused. Sessions and run history retained." : "Automation restored with schedule paused. Sessions unchanged." };
       }
       if (action === "delete") {
         perform(() => { this.service.delete(automationId, target, revision); });
-        return { ...result, deleted: true, message: "Definition deleted; run history and session identities retained. Session deletion is not supported by the host plugin API. Deletion does not stop or confirm uncertain session work." };
+        return { ...result, deleted: true, message: "Definition deleted; run history and session identities retained. Session deletion is outside this plugin’s scope. Deletion does not stop or confirm uncertain session work." };
       }
       const saved = perform(() => this.service.update(automationId, { ...target, expectedRevision: revision, enabled: action === "enable" }));
       return { ...result, definition: saved, message: action === "enable" ? "Schedule enabled for the successfully tested revision." : "Schedule paused; this does not cancel existing runs." };
@@ -133,6 +143,7 @@ export class AutomationChat {
 
 interface WorkspaceSelection { projectId: string; workspaceId: string }
 interface ManagementReads {
+  deadline: number;
   signal: AbortSignal;
   read<T>(operation: string, work: () => Promise<T>): Promise<T>;
 }
@@ -146,6 +157,7 @@ function currentWorkspace(targets: (WorkspaceSelection & { path: string })[], hi
 
 /** Leave time to return a useful dependency error before PI WEB's 10s callback deadline. */
 async function withManagementReads<T>(action: string, caller: AbortSignal, lifetime: AbortSignal, work: (reads: ManagementReads) => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 8000;
   const timeout = new AbortController();
   const signal = AbortSignal.any([caller, lifetime, timeout.signal]);
   signal.throwIfAborted();
@@ -158,7 +170,7 @@ async function withManagementReads<T>(action: string, caller: AbortSignal, lifet
   });
   try {
     return await Promise.race([work({
-      signal,
+      signal, deadline,
       async read(operation, read) {
         signal.throwIfAborted();
         phase = operation;

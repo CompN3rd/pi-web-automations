@@ -1,5 +1,6 @@
 import type { JsonValue, WorkspacePanelContextV5 } from "@jmfederico/pi-web/plugin-api";
 import { describe, expect, it, vi } from "vitest";
+import { chatRecord } from "./browser/chat-protocol.js";
 import { catalogFixture, managementSuccess } from "./browser-test-fixtures.js";
 import {
   ACTIVE_POLL_INTERVAL_MS,
@@ -9,6 +10,8 @@ import {
   type TimerApi,
 } from "./browser/automations-controller.js";
 import { AUTOMATIONS_OPERATIONS, type AutomationDefinition, type AutomationRun, type AutomationSnapshot } from "./browser/contracts.js";
+
+const signalMatcher: unknown = expect.any(AbortSignal);
 
 const definition: AutomationDefinition = {
   id: "automation-1", projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/repo", name: "Daily review", prompt: "Review changes", enabled: false,
@@ -52,6 +55,179 @@ function context(request: (operation: string, input: JsonValue) => Promise<JsonV
 }
 
 describe("AutomationsController", () => {
+  it("one confirmation automatically continues bounded batches and retains aggregate failure outcomes without retries", async () => {
+    let current = definition;
+    let calls = 0;
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>((operation, input) => {
+      if (operation !== "manage") return Promise.resolve(success({ ...snapshot(), definitions: [current] }));
+      if (chatRecord(input)["action"] === "archive") {
+        calls++;
+        current = { ...current, revision: 2, archivedAt: "2026-01-02T00:00:00Z" };
+        return Promise.resolve({ ...managementSuccess, automationId: definition.id, definition: json(current), sessionArchive: calls === 1 ? {
+          results: [{ sessionId: "session-A", status: "archived" }, { sessionId: "session-B", status: "uncertain", detail: "Host reply lost" }], traversalComplete: false, continuationAfter: "session-B",
+        } : { results: [{ sessionId: "session-C", status: "archived" }, { sessionId: "session-D", status: "skipped-pinned" }, { sessionId: "session-E", status: "failed" }], traversalComplete: true } });
+      }
+      return Promise.resolve(managementSuccess);
+    });
+    const target = context(backend); const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value); await controller.refresh(target.value);
+    controller.confirmLifecycle(target.value, definition, "archive");
+    expect(controller.state(target.value).confirmation?.archiveSessions).toBeUndefined();
+    controller.setArchiveSessions(target.value, true);
+    await controller.applyLifecycle(target.value);
+    expect(backend).toHaveBeenCalledWith("manage", { action: "archive", automationId: definition.id, expectedRevision: 1, archiveSessions: true }, { signal: signalMatcher });
+    expect(backend).toHaveBeenCalledWith("manage", { action: "archive", automationId: definition.id, expectedRevision: 2, archiveSessions: true, archiveSessionAfter: "session-B" }, { signal: signalMatcher });
+    expect(calls).toBe(2);
+    expect(controller.state(target.value)).toMatchObject({ showArchived: true, selectedId: definition.id, sessionArchive: { summary: { traversalComplete: true, results: [
+      { status: "archived" }, { status: "uncertain" }, { status: "archived" }, { status: "skipped-pinned" }, { status: "failed" },
+    ] } } });
+    expect(controller.state(target.value).confirmation).toBeUndefined();
+    controller.confirmLifecycle(target.value, current, "archive");
+    expect(controller.state(target.value).confirmation?.archiveSessions).toBeUndefined();
+    await controller.setArchived(target.value, current, false);
+    expect(backend).toHaveBeenCalledWith("manage", { action: "restore", automationId: definition.id, expectedRevision: current.revision });
+    controller.disconnect(target.value);
+  });
+
+  it.each(["timeout", "cancelled", "blocked", "no-progress"])("stops automatic continuation on %s without infinite retries", async (reason) => {
+    const archived = { ...definition, revision: 2, archivedAt: "2026-01-02T00:00:00Z" };
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>((operation) => Promise.resolve(operation === "manage"
+      ? { ...managementSuccess, automationId: definition.id, definition: json(archived), sessionArchive: { results: [{ sessionId: "A", status: "deferred" }], traversalComplete: false, continuationAfter: "", ...(reason === "no-progress" ? {} : { stopReason: reason }) } }
+      : success({ ...snapshot(), definitions: [archived] })));
+    const target = context(backend); const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value); await controller.refresh(target.value);
+    await controller.setArchived(target.value, definition, true, true);
+    expect(backend.mock.calls.filter(([operation]) => operation === "manage")).toHaveLength(1);
+    expect(controller.state(target.value).notice).toContain("stopped");
+    controller.disconnect(target.value);
+  });
+
+  it("automatically continues an advancing budget-limited batch but stops a repeated cursor", async () => {
+    const archived = { ...definition, revision: 2, archivedAt: "2026-01-02T00:00:00Z" };
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>((operation) => Promise.resolve(operation === "manage"
+      ? { ...managementSuccess, automationId: definition.id, definition: json(archived), sessionArchive: { results: [{ sessionId: "A", status: "archived" }, { sessionId: "B", status: "deferred" }], traversalComplete: false, continuationAfter: "A", stopReason: "budget" } }
+      : success({ ...snapshot(), definitions: [archived] })));
+    const target = context(backend); const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value); await controller.refresh(target.value);
+    await controller.setArchived(target.value, definition, true, true);
+    const mutations = backend.mock.calls.filter(([operation]) => operation === "manage");
+    expect(mutations).toHaveLength(2);
+    expect(mutations[1]?.[1]).toEqual({ action: "archive", automationId: definition.id, expectedRevision: 2, archiveSessions: true, archiveSessionAfter: "A" });
+    expect(controller.state(target.value).sessionArchive?.summary.results).toHaveLength(2);
+    expect(controller.state(target.value).notice).toContain("without cursor progress");
+    controller.disconnect(target.value);
+  });
+
+  it("keeps the archived revision fence on automatic continuation rather than adopting concurrent edits", async () => {
+    let current = { ...definition, revision: 2, archivedAt: "2026-01-02T00:00:00Z" };
+    let calls = 0;
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>((operation, input) => {
+      if (operation !== "manage") return Promise.resolve(success({ ...snapshot(), definitions: [current] }));
+      calls++;
+      if (calls === 1) {
+        const saved = current;
+        current = { ...current, revision: 4 };
+        return Promise.resolve({ ...managementSuccess, automationId: definition.id, definition: json(saved), sessionArchive: { results: [{ sessionId: "A", status: "archived" }], traversalComplete: false, continuationAfter: "A" } });
+      }
+      expect(chatRecord(input)["expectedRevision"]).toBe(2);
+      return Promise.reject(new Error("Automation was changed by another client"));
+    });
+    const target = context(backend); const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value); await controller.refresh(target.value);
+    await controller.setArchived(target.value, definition, true, true);
+    expect(calls).toBe(2);
+    expect(controller.state(target.value).sessionArchive?.summary.results).toEqual([{ sessionId: "A", status: "archived" }]);
+    expect(controller.state(target.value).error).toContain("changed by another client");
+    await controller.continueSessionArchive(target.value);
+    expect(calls).toBe(2);
+    expect(controller.state(target.value).error).toContain("revision changed");
+    controller.disconnect(target.value);
+  });
+
+  it.each([1, 2])("retains unconfirmed batch %i across successful automatic polling until explicit reconciliation finishes", async (lostBatch) => {
+    const archived = { ...definition, revision: 2, archivedAt: "2026-01-02T00:00:00Z" };
+    const archivedSessions = new Set<string>();
+    let mutations = 0;
+    let reconciling = false;
+    let finishReconciliation: ((value: JsonValue) => void) | undefined;
+    const response = (sessionId: string, status: string, traversalComplete: boolean): JsonValue => ({ ...managementSuccess,
+      automationId: definition.id, definition: json(archived), sessionArchive: { results: [{ sessionId, status }], traversalComplete,
+        ...(traversalComplete ? {} : { continuationAfter: sessionId }) } });
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>((operation, input) => {
+      if (operation !== "manage") return Promise.resolve(success({ ...snapshot(), definitions: [archived] }));
+      mutations++;
+      if (reconciling) {
+        if (chatRecord(input)["archiveSessionAfter"] === undefined) return Promise.resolve(response("A", "already-archived", false));
+        return new Promise((resolve) => { finishReconciliation = resolve; });
+      }
+      const sessionId = mutations === 1 ? "A" : "B";
+      archivedSessions.add(sessionId);
+      if (mutations === lostBatch) return Promise.reject(new Error("Reply lost after host admission"));
+      return Promise.resolve(response(sessionId, "archived", false));
+    });
+    const timers = timerFixture();
+    let poll: (() => void) | undefined;
+    const target = context(backend);
+    const controller = new AutomationsController({
+      setTimeout(callback, delay) { poll = callback; return timers.api.setTimeout(callback, delay); },
+      clearTimeout(handle) { timers.api.clearTimeout(handle); },
+    });
+    controller.connect(target.value); await controller.refresh(target.value);
+    await controller.setArchived(target.value, definition, true, true);
+    expect(archivedSessions.size).toBe(lostBatch);
+    expect(controller.state(target.value).sessionArchive?.summary.results).toHaveLength(lostBatch - 1);
+    expect(controller.state(target.value).sessionArchive?.unconfirmedBatch).toContain("Reply lost after host admission");
+    poll?.(); await controller.refresh(target.value);
+    expect(controller.state(target.value).error).toBeUndefined();
+    expect(controller.state(target.value).sessionArchive?.unconfirmedBatch).toContain("outcomes are unconfirmed");
+    expect(mutations).toBe(lostBatch);
+    reconciling = true;
+    const pending = controller.setArchived(target.value, archived, true, true);
+    await flushMicrotasks();
+    expect(controller.state(target.value).sessionArchive?.unconfirmedBatch).toContain("outcomes are unconfirmed");
+    expect(finishReconciliation).toBeDefined();
+    finishReconciliation?.(response("B", "already-archived", true)); await pending;
+    expect(controller.state(target.value).sessionArchive?.unconfirmedBatch).toBeUndefined();
+    expect(controller.state(target.value).sessionArchive?.summary.traversalComplete).toBe(true);
+    controller.disconnect(target.value);
+  });
+
+  it.each(["stop", "disconnect"])("forwards %s cancellation and never starts another batch after a late reply", async (source) => {
+    const archived = { ...definition, revision: 2, archivedAt: "2026-01-02T00:00:00Z" };
+    let resolve: ((value: JsonValue) => void) | undefined;
+    const backend = vi.fn<(operation: string, input: JsonValue, options?: { signal?: AbortSignal }) => Promise<JsonValue>>((operation) => operation === "manage"
+      ? new Promise((done) => { resolve = done; }) : Promise.resolve(success({ ...snapshot(), definitions: [archived] })));
+    const target = context(backend); const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value); await controller.refresh(target.value);
+    const pending = controller.setArchived(target.value, definition, true, true);
+    if (source === "stop") controller.stopSessionArchive(target.value); else controller.disconnect(target.value);
+    expect(backend.mock.calls.find(([operation]) => operation === "manage")?.[2]?.signal?.aborted).toBe(true);
+    resolve?.({ ...managementSuccess, automationId: definition.id, definition: json(archived), sessionArchive: { results: [{ sessionId: "A", status: "archived" }], traversalComplete: false, continuationAfter: "A" } });
+    await pending;
+    expect(backend.mock.calls.filter(([operation]) => operation === "manage")).toHaveLength(1);
+    expect(controller.state(target.value).error).toContain("unconfirmed");
+    controller.disconnect(target.value);
+  });
+
+  it("resets opt-in on selection and context changes and refuses continuation after concurrent restore", async () => {
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue(success(snapshot()));
+    const target = context(backend); const other = context(backend, "remote", "different");
+    const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value); await controller.refresh(target.value);
+    controller.confirmLifecycle(target.value, definition, "archive"); controller.setArchiveSessions(target.value, true);
+    controller.selectDefinition(target.value, definition.id);
+    expect(controller.state(target.value).confirmation).toBeUndefined();
+    controller.confirmLifecycle(target.value, definition, "archive"); controller.setArchiveSessions(target.value, true);
+    controller.connect(other.value); await controller.refresh(other.value);
+    expect(controller.state(target.value).confirmation).toBeUndefined();
+    controller.connect(target.value); await controller.refresh(target.value);
+    controller.state(target.value).sessionArchive = { automationId: definition.id, summary: { results: [], traversalComplete: false, continuationAfter: "session" } };
+    await controller.continueSessionArchive(target.value);
+    expect(controller.state(target.value).error).toContain("no longer archived");
+    expect(backend.mock.calls.some(([operation]) => operation === "manage")).toBe(false);
+    controller.disconnect(target.value);
+  });
+
   it("pins initial selection across reordered refreshes and reconciles only when it leaves the view", async () => {
     const second = { ...definition, id: "automation-2", name: "Other review" };
     const archived = { ...definition, id: "archived", archivedAt: "2026-01-02T00:00:00Z" };
@@ -287,7 +463,7 @@ describe("AutomationsController", () => {
     controller.connect(target.value); await controller.refresh(target.value);
     controller.beginCreate(target.value); await controller.saveEditor(target.value);
     expect(controller.state(target.value).editor).toBeDefined();
-    expect(controller.state(target.value).error).toBe("Target revoked");
+    expect(controller.state(target.value).error).toContain("Target revoked");
     expect(backend.mock.calls.filter(([operation]) => operation === "manage")).toHaveLength(1);
     controller.disconnect(target.value);
   });

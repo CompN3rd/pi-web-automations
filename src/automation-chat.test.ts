@@ -85,15 +85,22 @@ async function fixture(machineId: string, execution = false) {
   const targetIds = ["a-other", "z-current", "empty-other", "inaccessible"];
   const projectsList = vi.fn(() => Promise.resolve(targetIds.map((id) => authority(id).project)));
   const workspacesList = vi.fn((projectId: string) => Promise.resolve(targetIds.filter((id) => `p-${id}` === projectId).map((id) => ({ ...authority(id).workspace, ...(id === "alias" ? { path: "/z-current" } : {}) }))));
+  const archivedSessions = new Set<string>();
+  const sessionGet = vi.fn((target: { sessionId: string }) => Promise.resolve({ id: target.sessionId, cwd: "/a-other", archived: archivedSessions.has(target.sessionId), pinned: false, runtime: "idle", created: null, modified: null, archivedAt: null }));
+  const lifecycleGet = vi.fn((target: { sessionId: string }) => Promise.resolve({ sessionId: target.sessionId, pinned: false, archived: archivedSessions.has(target.sessionId) }));
+  const archiveSession = vi.fn((target: { sessionId: string }) => { archivedSessions.add(target.sessionId); return Promise.resolve(); });
+  const restoreSession = vi.fn();
+  const deleteSession = vi.fn();
   const activation = await plugin.activate(context);
   await activation.start?.({ signal: context.signal, capabilities: { resolve: (capability) => capability.parse({
     "pi-sessions": { version: 1, create: createSession, run: () => Promise.reject(new Error("unused")) },
     "pi-session-events": { version: 1, connect },
     workspaces: { version: 1, resolve },
+    "session-lifecycle": { version: 1, get: lifecycleGet, archive: archiveSession, restore: restoreSession, delete: deleteSession, pin: vi.fn(), unpin: vi.fn() },
     catalog: { version: 1,
       projects: { list: projectsList, get: () => Promise.reject(new Error("unused")) },
       workspaces: { list: workspacesList, get: () => Promise.reject(new Error("unused")) },
-      sessions: { list: () => Promise.resolve([]), get: () => Promise.reject(new Error("unused")) },
+      sessions: { list: () => Promise.resolve([]), get: sessionGet },
     },
   }[capability.id]) } });
   cleanups.push(async () => { lifetime.abort(); await activation.dispose?.(context.signal); await settle(); });
@@ -134,7 +141,7 @@ async function fixture(machineId: string, execution = false) {
     Reflect.apply(accept, undefined, [() => backend]);
   });
   const close = () => { session.abort(); };
-  return { projectsList, workspacesList, request, query, connect, saved, lifetime, close, bus, hooks, resolve, validate, createSession, finishTask, targetIds,
+  return { archivedSessions, sessionGet, lifecycleGet, archiveSession, restoreSession, deleteSession, projectsList, workspacesList, request, query, connect, saved, lifetime, close, bus, hooks, resolve, validate, createSession, finishTask, targetIds,
     setCwd: (value: string) => { cwd = value; },
     unavailable: () => { available = false; },
     fixtureStore: () => { const store = new AutomationStore(join(root, "automations.sqlite")); cleanups.push(() => { store.close(); }); return store; } };
@@ -392,6 +399,69 @@ describe("host companion backend management boundary", () => {
     f.resolve.mockClear();
     await expect(f.query({ action: "inspect", automationId: "missing-id" })).rejects.toThrow("not found");
     expect(f.resolve).not.toHaveBeenCalled();
+  });
+
+  it.each(["local", "remote-1"])("archives exact retained sessions through browser and chat on %s with automatic traversal and aggregate retry", async (machine) => {
+    const f = await fixture(machine);
+    const automationId = String(f.saved[0]?.["id"]);
+    const store = f.fixtureStore();
+    const definition = store.getDefinition(automationId); if (!definition) throw new Error("Missing fixture");
+    for (const id of ["session-A-full", "session-B-full"]) {
+      store.createManualRun(definition, id, new Date().toISOString());
+      store.markRunStarting(id, `attempt-${id}`, new Date().toISOString());
+      store.recordSession(id, id);
+      store.finishRun(id, { status: "completed", completedAt: new Date().toISOString() });
+    }
+    f.archiveSession.mockRejectedValueOnce(new Error("host busy race"));
+    const first = await f.request("z-current", "manage", { action: "archive", automationId, expectedRevision: 1, archiveSessions: true });
+    expect(first).toMatchObject({ definition: { revision: 2, enabled: false }, sessionArchive: { results: [{ sessionId: "session-A-full", status: "uncertain", detail: "host busy race" }, { sessionId: "session-B-full", status: "archived" }], traversalComplete: true } });
+    expect(store.getDefinition(automationId)?.archivedAt).toBeDefined();
+    const second = (await f.query({ action: "archive", automationId, expectedRevision: 2, archiveSessions: true, archiveSessionAfter: "session-A-full" }))["details"];
+    expect(second).toMatchObject({ sessionArchive: { results: [{ sessionId: "session-B-full", status: "already-archived" }], traversalComplete: true } });
+    await f.query({ action: "archive", automationId, expectedRevision: 2, archiveSessions: true });
+    expect(f.archiveSession).toHaveBeenCalledTimes(3);
+    const reconciled = (await f.query({ action: "archive", automationId, expectedRevision: 2, archiveSessions: true }))["details"];
+    expect(reconciled).toMatchObject({ sessionArchive: { results: [{ sessionId: "session-A-full", status: "already-archived" }, { sessionId: "session-B-full", status: "already-archived" }] } });
+    expect(f.archiveSession).toHaveBeenCalledTimes(3);
+    expect(f.archiveSession.mock.calls.map(([target]) => target.sessionId)).toEqual(["session-A-full", "session-B-full", "session-A-full"]);
+    for (const call of f.archiveSession.mock.calls) expect(call[0]).toEqual({ projectId: "p-a-other", workspaceId: "a-other", sessionId: call[0].sessionId });
+    await f.query({ action: "restore", automationId, expectedRevision: 2 });
+    expect(f.restoreSession).not.toHaveBeenCalled(); expect(f.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["local", "remote-1"])("one chat archive automatically processes all fast recorded sessions on %s", async (machine) => {
+    const f = await fixture(machine);
+    const automationId = String(f.saved[0]?.["id"]);
+    const store = f.fixtureStore();
+    const definition = store.getDefinition(automationId); if (!definition) throw new Error("Missing fixture");
+    for (const id of ["session-A", "session-B", "session-C"]) {
+      store.createManualRun(definition, id, new Date().toISOString());
+      store.markRunStarting(id, `attempt-${id}`, new Date().toISOString());
+      store.recordSession(id, id);
+      store.finishRun(id, { status: "completed", completedAt: new Date().toISOString() });
+    }
+    const result = chatRecord((await f.query({ action: "archive", automationId, expectedRevision: 1, archiveSessions: true }))["details"]);
+    expect(result["sessionArchive"]).toEqual({ results: ["session-A", "session-B", "session-C"].map((sessionId) => ({ sessionId, status: "archived" })), traversalComplete: true });
+    expect(f.archiveSession).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["active", "unknown", "stale", "inaccessible"])("blocks optional session mutations for %s guards", async (guard) => {
+    const f = await fixture("local");
+    const automationId = String(f.saved[guard === "inaccessible" ? 2 : 0]?.["id"]);
+    if (["active", "unknown"].includes(guard)) {
+      const store = f.fixtureStore(); const definition = store.getDefinition(automationId); if (!definition) throw new Error("Missing fixture");
+      store.createManualRun(definition, "guard-run", new Date().toISOString());
+      if (guard === "unknown") store.markRunStarting("guard-run", "guard-attempt", new Date().toISOString());
+      if (guard === "unknown") store.finishRun("guard-run", { status: "unknown", completedAt: new Date().toISOString() });
+    }
+    await expect(f.query({ action: "archive", automationId, expectedRevision: guard === "stale" ? 9 : 1, archiveSessions: true })).rejects.toThrow();
+    expect(f.archiveSession).not.toHaveBeenCalled(); expect(f.lifecycleGet).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, false])("retains sessions with archiveSessions %s", async (option) => {
+    const f = await fixture("local"); const automationId = String(f.saved[0]?.["id"]);
+    await f.query({ action: "archive", automationId, expectedRevision: 1, ...(option === undefined ? {} : { archiveSessions: option }) });
+    expect(f.lifecycleGet).not.toHaveBeenCalled(); expect(f.archiveSession).not.toHaveBeenCalled(); expect(f.sessionGet).not.toHaveBeenCalled();
   });
 
   it("archives and restores through shared management without creating or removing sessions", async () => {

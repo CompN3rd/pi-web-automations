@@ -66,6 +66,14 @@ function renderPanel(html: HtmlTemplateTag, controller: AutomationsController, c
       </header>
       ${state.error === undefined ? null : html`<div class="message error" role="alert">${state.error}</div>`}
       ${state.notice === undefined ? null : html`<div class="message" role="status">${state.notice}</div>`}
+      ${state.sessionArchive === undefined ? null : html`<section class="message" role="status" aria-label="Session archive batch results">
+        <strong>Session archive progress · ${state.sessionArchive.automationId}</strong>
+        <p>${state.sessionArchive.summary.results.length} recorded session outcomes · ${state.sessionArchive.summary.results.filter((result) => result.status === "archived" || result.status === "already-archived").length} confirmed archived · ${state.sessionArchive.summary.results.filter((result) => result.status.startsWith("skipped-")).length} skipped · ${state.sessionArchive.summary.results.filter((result) => ["failed", "uncertain", "deferred"].includes(result.status)).length} need attention.</p>
+        ${state.sessionArchive.unconfirmedBatch === undefined ? html`<p>${state.archiveCancellation ? "Processing all recorded sessions automatically in bounded batches…" : state.sessionArchive.summary.traversalComplete ? "Traversal finished; skipped, failed or uncertain sessions are not confirmed archived." : "Traversal stopped; remaining sessions were not attempted. Inspect before continuing."}</p>` : html`<p role="alert">${state.sessionArchive.unconfirmedBatch} Sessions in the unconfirmed batch may already be archived. Snapshot refresh does not reconcile these outcomes.</p>`}
+        ${state.sessionArchive.summary.results.map((result) => html`<p><code>${result.sessionId}</code>: ${result.status}${result.detail !== undefined ? ` — ${result.detail}` : ""}</p>`)}
+        ${state.archiveCancellation ? html`<button type="button" @click=${() => { controller.stopSessionArchive(context); }}>Stop session archive</button>` : state.sessionArchive.summary.traversalComplete ? null : html`<button type="button" ?disabled=${state.mutating} @click=${() => { void controller.continueSessionArchive(context); }}>Continue remaining sessions</button>`}
+        <p>To retry skipped/failed/uncertain sessions, select this automation in Archived and use Archive sessions / retry. This rechecks host state from the start. No automatic retry after a lost reply.</p>
+      </section>`}
       ${state.editor === undefined ? null : renderEditor(html, controller, context, state)}
       ${renderDefinitions(html, controller, context, state)}
     </section>
@@ -188,7 +196,7 @@ function renderDefinition(html: HtmlTemplateTag, controller: AutomationsControll
     <article class="definition-card" style=${`border-top:3px solid ${automationColor(definition.id)}`}>
       <header><div><h3>${definition.name}</h3>${definition.description === undefined ? null : html`<p>${definition.description}</p>`}</div><span class=${definition.enabled ? "status enabled" : "status"}>${archived ? "archived" : definition.enabled ? "enabled" : "paused"}</span></header>
       <div class="actions definition-actions">
-        ${archived ? html`<button type="button" class="primary" ?disabled=${state.mutating} @click=${() => { void controller.setArchived(context, definition, false); }}>Restore paused</button>` : html`
+        ${archived ? html`<button type="button" class="primary" ?disabled=${state.mutating} @click=${() => { void controller.setArchived(context, definition, false); }}>Restore paused</button><button type="button" data-lifecycle-action="archive" ?disabled=${state.mutating || blocked} @click=${() => { controller.confirmLifecycle(context, definition, "archive"); }}>Archive sessions / retry</button>` : html`
           <button type="button" class="primary" ?disabled=${state.mutating} @click=${() => { void controller.runNow(context, definition); }}>Run now / test</button>
           <button type="button" ?disabled=${state.mutating || (!definition.enabled && !tested)} title=${!definition.enabled && !tested ? "Run this exact revision successfully before enabling" : ""} @click=${() => { void controller.setEnabled(context, definition, !definition.enabled); }}>${definition.enabled ? "Pause" : "Enable"}</button>
           <button type="button" ?disabled=${state.mutating} @click=${() => { controller.beginEdit(context, definition); }}>Edit</button>
@@ -199,7 +207,8 @@ function renderDefinition(html: HtmlTemplateTag, controller: AutomationsControll
         <section class="lifecycle-confirmation" aria-label=${`Confirm ${state.confirmation.action}`}>
           <h4>${state.confirmation.action === "delete" ? "Delete" : "Archive"} ${state.confirmation.definition.name}?</h4>
           <p>${state.confirmation.action === "delete" ? "This removes the definition from management and cannot be undone. Run history is retained." : "Scheduling will pause and this automation will move to Archived. You can restore it later with scheduling paused."}</p>
-          <p class="session-retention">Sessions are retained. Also ${state.confirmation.action === "delete" ? "deleting" : "archiving"} automation sessions is unavailable: this version of PI WEB does not expose that operation to plugins.</p>
+          ${state.confirmation.action === "archive" ? html`<label><input type="checkbox" .checked=${state.confirmation.archiveSessions === true} ?disabled=${state.mutating} @change=${(event: Event) => { if (event.target instanceof HTMLInputElement) controller.setArchiveSessions(context, event.target.checked); }}> Also archive this automation’s sessions</label>
+            <p class="session-retention">Unchecked by default. Sessions remain saved. Only exact recorded sessions, not descendants; pinned and busy sessions are skipped. All recorded sessions are processed automatically in bounded batches; progress and partial failures are shown. Stop prevents new work, not an admitted mutation. Retry from Archived rechecks host state. Restoring the automation never restores sessions.</p>` : html`<p class="session-retention">Sessions are retained. Permanent session deletion is outside this plugin’s scope.</p>`}
           <div class="actions"><button type="button" class=${state.confirmation.action === "delete" ? "danger" : "primary"} ?disabled=${state.mutating} @click=${() => { void controller.applyLifecycle(context); }}>Confirm ${state.confirmation.action}</button><button type="button" ?disabled=${state.mutating} @click=${(event: Event) => { focusDetailControl(event, `[data-lifecycle-action="${state.confirmation?.action ?? ""}"]`); controller.confirmLifecycle(context); }}>Cancel</button></div>
         </section>`}
       <nav class="detail-tabs" aria-label="Automation details">
