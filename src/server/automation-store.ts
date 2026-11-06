@@ -27,6 +27,7 @@ interface AutomationRow {
   description: string | null;
   prompt: string;
   enabled: number;
+  archived_at: string | null;
   revision: number;
   tested_revision: number | null;
   trigger_json: string;
@@ -88,7 +89,7 @@ export interface AutomationRunListOptions {
 }
 
 export class AutomationStoreConflictError extends Error {
-  constructor(readonly kind: "duplicate-name" | "revision" | "active-run" | "unconfirmed-run", message: string) {
+  constructor(readonly kind: "duplicate-name" | "revision" | "active-run" | "unconfirmed-run" | "archived", message: string) {
     super(message);
   }
 }
@@ -148,8 +149,8 @@ export class AutomationStore {
         INSERT INTO automations (
           id, project_id, workspace_id, workspace_path, name, description, prompt, enabled,
           revision, tested_revision, trigger_json, model_json, thinking_json, timeout_ms,
-          abort_grace_ms, next_run_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          abort_grace_ms, next_run_at, created_at, updated_at, archived_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         definition.id,
         definition.projectId,
@@ -169,6 +170,7 @@ export class AutomationStore {
         definition.nextRunAt ?? null,
         definition.createdAt,
         definition.updatedAt,
+        definition.archivedAt ?? null,
       );
     } catch (error) {
       throw translateConstraint(error, `An automation named "${definition.name}" already exists`);
@@ -222,10 +224,26 @@ export class AutomationStore {
     })();
   }
 
+  setDefinitionArchived(id: string, projectId: string, workspaceId: string, expectedRevision: number, archived: boolean, at: string): AutomationDefinition {
+    return this.db.transaction(() => {
+      if (this.hasActiveRun(id) || this.hasUnknownRun(id)) throw new AutomationStoreConflictError("active-run", "Cannot archive or restore an automation with active or unconfirmed work");
+      const result = this.db.prepare(`
+        UPDATE automations SET archived_at = ?, enabled = 0, next_run_at = NULL,
+          tested_revision = CASE WHEN tested_revision = revision THEN revision + 1 ELSE NULL END,
+          revision = revision + 1, updated_at = ?
+        WHERE id = ? AND project_id = ? AND workspace_id = ? AND revision = ? AND deleted_at IS NULL
+      `).run(archived ? at : null, at, id, projectId, workspaceId, expectedRevision);
+      if (result.changes !== 1) throw new AutomationStoreConflictError("revision", "Automation was changed by another client");
+      const saved = this.getDefinitionScoped(id, projectId, workspaceId);
+      if (!saved) throw new Error("Automation disappeared after archive change");
+      return saved;
+    })();
+  }
+
   listDueDefinitions(now: string): AutomationDefinition[] {
     const rows = this.db.prepare<[string], AutomationRow>(`
       SELECT * FROM automations
-      WHERE deleted_at IS NULL AND enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+      WHERE deleted_at IS NULL AND archived_at IS NULL AND enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
       ORDER BY next_run_at, created_at
     `).all(now);
     return rows.map(automationFromRow);
@@ -234,7 +252,7 @@ export class AutomationStore {
   claimScheduledOccurrence(definition: AutomationDefinition, nextRunAt: string | undefined, now: string, runId: string): AutomationRun {
     return this.db.transaction(() => {
       const current = this.getDefinition(definition.id);
-      if (current === undefined || !current.enabled || current.revision !== definition.revision || current.nextRunAt !== definition.nextRunAt) {
+      if (current === undefined || current.archivedAt !== undefined || !current.enabled || current.revision !== definition.revision || current.nextRunAt !== definition.nextRunAt) {
         throw new Error("Automation schedule changed before the occurrence could be claimed");
       }
       const overlapping = this.hasActiveRun(definition.id) || this.hasUnknownRun(definition.id);
@@ -257,6 +275,9 @@ export class AutomationStore {
 
   createManualRun(definition: AutomationDefinition, runId: string, now: string): AutomationRun {
     return this.db.transaction(() => {
+      const current = this.getDefinitionScoped(definition.id, definition.projectId, definition.workspaceId);
+      if (current?.revision !== definition.revision) throw new AutomationStoreConflictError("revision", "Automation was changed by another client");
+      if (current.archivedAt !== undefined) throw new AutomationStoreConflictError("archived", "Restore the archived automation before running it");
       if (this.hasUnknownRun(definition.id)) throw new AutomationStoreConflictError("unconfirmed-run", "Automation blocked by unconfirmed work; inspect Sessions before creating a replacement");
       if (this.hasActiveRun(definition.id)) throw new AutomationStoreConflictError("active-run", "Automation already has an active run");
       const run = runFromDefinition(definition, { id: runId, source: "manual", scheduledFor: now, queuedAt: now, status: "queued" });
@@ -522,9 +543,9 @@ export class AutomationStore {
     `);
     const current = this.db.prepare<[], { version: number | null }>("SELECT MAX(version) AS version FROM automation_schema").get();
     if (current === undefined) throw new Error("Could not read automations database schema version");
-    if ((current.version ?? 0) > 1) throw new Error(`Unsupported automations database schema: ${String(current.version)}`);
-    if ((current.version ?? 0) === 1) return;
-    this.db.transaction(() => {
+    if ((current.version ?? 0) > 2) throw new Error(`Unsupported automations database schema: ${String(current.version)}`);
+    if ((current.version ?? 0) === 2) return;
+    if ((current.version ?? 0) === 0) this.db.transaction(() => {
       this.db.exec(`
         CREATE TABLE automations (
           id TEXT PRIMARY KEY,
@@ -605,6 +626,12 @@ export class AutomationStore {
         INSERT INTO automation_schema(version, applied_at) VALUES (1, datetime('now'));
       `);
     })();
+    this.db.transaction(() => {
+      this.db.exec(`
+        ALTER TABLE automations ADD COLUMN archived_at TEXT;
+        INSERT INTO automation_schema(version, applied_at) VALUES (2, datetime('now'));
+      `);
+    })();
   }
 }
 
@@ -618,6 +645,7 @@ function automationFromRow(row: AutomationRow): AutomationDefinition {
     ...(row.description === null ? {} : { description: row.description }),
     prompt: row.prompt,
     enabled: row.enabled === 1,
+    ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     revision: row.revision,
     ...(row.tested_revision === null ? {} : { testedRevision: row.tested_revision }),
     trigger: parseStoredTrigger(row.trigger_json),

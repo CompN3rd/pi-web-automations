@@ -43,6 +43,7 @@ export interface AutomationDefinition {
   description?: string;
   prompt: string;
   enabled: boolean;
+  archivedAt?: string;
   revision: number;
   testedRevision?: number;
   trigger: AutomationTrigger;
@@ -181,6 +182,7 @@ function parseDefinition(value: unknown): AutomationDefinition {
   const description = optionalString(record["description"], "definition.description");
   const testedRevision = optionalNumber(record["testedRevision"], "definition.testedRevision");
   const nextRunAt = optionalString(record["nextRunAt"], "definition.nextRunAt");
+  const archivedAt = optionalString(record["archivedAt"], "definition.archivedAt");
   return {
     id: expectString(record["id"], "definition.id"),
     projectId: expectString(record["projectId"], "definition.projectId"),
@@ -190,6 +192,7 @@ function parseDefinition(value: unknown): AutomationDefinition {
     ...(description === undefined ? {} : { description }),
     prompt: expectString(record["prompt"], "definition.prompt"),
     enabled: expectBoolean(record["enabled"], "definition.enabled"),
+    ...(archivedAt === undefined ? {} : { archivedAt }),
     revision: expectNumber(record["revision"], "definition.revision"),
     ...(testedRevision === undefined ? {} : { testedRevision }),
     trigger,

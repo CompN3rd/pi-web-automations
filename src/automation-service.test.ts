@@ -84,6 +84,76 @@ afterEach(() => {
 });
 
 describe("AutomationService", () => {
+  it("archives and restores tested schedules paused while fencing stale clients", async () => {
+    vi.useFakeTimers();
+    const { service, runner, store } = fixture();
+    const definition = service.create(scope, draft({ trigger: { type: "interval", intervalMs: 60_000 } }));
+    service.runNow(definition.id, scope, 1);
+    await flushMicrotasks();
+    runner.prompt.resolve(usage);
+    await flushMicrotasks();
+    service.update(definition.id, { ...scope, expectedRevision: 1, enabled: true });
+    const archived = service.setArchived(definition.id, scope, 1, true);
+    expect(archived).toMatchObject({ enabled: false, revision: 2, testedRevision: 2 });
+    expect(typeof archived.archivedAt).toBe("string");
+    expect(archived.nextRunAt).toBeUndefined();
+    expect(service.list(scope)).toEqual([archived]);
+    expect(store.listDueDefinitions("2099-01-01T00:00:00.000Z")).toEqual([]);
+    expect(() => service.runNow(definition.id, scope, 2)).toThrow("Restore");
+    expect(() => service.update(definition.id, { ...scope, expectedRevision: 2, enabled: true })).toThrow("Restore");
+    expect(() => service.update(definition.id, { ...scope, expectedRevision: 2, prompt: "Changed" })).toThrow("Restore");
+    expect(() => service.setArchived(definition.id, scope, 1, false)).toThrow("changed by another client");
+    expect(() => service.setArchived(definition.id, { ...scope, workspaceId: "other" }, 2, false)).toThrow("not found");
+    const restored = service.setArchived(definition.id, scope, 2, false);
+    expect(restored).toMatchObject({ enabled: false, revision: 3, testedRevision: 3 });
+    expect(restored.archivedAt).toBeUndefined();
+    expect(restored.nextRunAt).toBeUndefined();
+    expect(() => service.update(definition.id, { ...scope, expectedRevision: 1, enabled: true })).toThrow("changed by another client");
+    expect(service.listRuns(scope)[0]).toMatchObject({ sessionId: "session-1", status: "completed" });
+    expect(service.update(definition.id, { ...scope, expectedRevision: 3, enabled: true }).enabled).toBe(true);
+  });
+
+  it.each(["enabled", "active", "unknown"] as const)("rejects restore of a current automation with %s work/state without promising a pause", (state) => {
+    const { service, store } = fixture();
+    const definition = service.create(scope, draft({ trigger: { type: "interval", intervalMs: 60_000 } }));
+    const tested = store.replaceDefinition({ ...definition, testedRevision: definition.revision }, definition.revision);
+    const enabled = service.update(tested.id, { ...scope, expectedRevision: tested.revision, enabled: true });
+    if (state !== "enabled") {
+      const run = store.createManualRun(enabled, "restore-run", new Date().toISOString());
+      if (state === "unknown") {
+        store.markRunStarting(run.id, "restore-attempt", new Date().toISOString());
+        store.finishRun(run.id, { status: "unknown", completedAt: new Date().toISOString() });
+      }
+    }
+    const before = service.inspect(definition.id, scope);
+    expect(before.enabled).toBe(state !== "unknown");
+    if (state === "unknown") expect(before.nextRunAt).toBeUndefined();
+    else expect(before.nextRunAt).toBeDefined();
+    expect(() => service.setArchived(definition.id, scope, definition.revision, false)).toThrow("not archived");
+    expect(service.inspect(definition.id, scope)).toEqual(before);
+  });
+
+  it("blocks archive for active and unknown work and preserves untested status", () => {
+    vi.useFakeTimers();
+    const { service, store } = fixture();
+    const definition = service.create(scope, draft());
+    const run = store.createManualRun(definition, "archive-guard", new Date().toISOString());
+    expect(() => service.setArchived(definition.id, scope, 1, true)).toThrow("active or unconfirmed");
+    store.markRunStarting(run.id, "archive-attempt", new Date().toISOString());
+    store.finishRun(run.id, { status: "unknown", completedAt: new Date().toISOString() });
+    expect(() => service.setArchived(definition.id, scope, 1, true)).toThrow("active or unconfirmed");
+    const untested = service.create(scope, draft({ name: "Untested" }));
+    const archived = service.setArchived(untested.id, scope, 1, true);
+    expect(archived.testedRevision).toBeUndefined();
+    expect(() => store.createManualRun(untested, "stale-run", new Date().toISOString())).toThrow("changed by another client");
+    expect(() => store.createManualRun(archived, "archived-run", new Date().toISOString())).toThrow("Restore");
+    const restored = service.setArchived(untested.id, scope, 2, false);
+    expect(restored.testedRevision).toBeUndefined();
+    expect(() => service.update(untested.id, { ...scope, expectedRevision: 3, enabled: true })).toThrow("successfully before enabling");
+    service.delete(untested.id, scope, 3);
+    expect(() => service.inspect(untested.id, scope)).toThrow("not found");
+  });
+
   it("requires a successful manual run before enabling the exact revision", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-24T12:00:00.000Z"));

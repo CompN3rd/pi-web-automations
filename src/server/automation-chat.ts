@@ -70,7 +70,7 @@ export class AutomationChat {
         signal.throwIfAborted();
         const definitions = this.service.list({ ...scope, workspacePath: authority.workspace.path });
         groups.push({ project: authority.project, workspace: authority.workspace,
-          definitions: definitions.map((definition) => ({ id: definition.id, name: definition.name, description: definition.description, enabled: definition.enabled, revision: definition.revision, testedRevision: definition.testedRevision, trigger: definition.trigger })) });
+          definitions: definitions.map((definition) => ({ id: definition.id, name: definition.name, description: definition.description, enabled: definition.enabled, archivedAt: definition.archivedAt, revision: definition.revision, testedRevision: definition.testedRevision, trigger: definition.trigger })) });
       }
       return { machine, currentWorkspace: currentAuthority?.workspace, generatedAt: new Date().toISOString(), unavailableWorkspaces, workspaces: groups };
     }
@@ -115,9 +115,13 @@ export class AutomationChat {
         const run = perform(() => this.service.runNow(automationId, target, revision));
         return { ...result, run, message: "Run/test queued, not completed. Inspect for status and the visible sessionId once created. Only successful settlement tests this revision." };
       }
+      if (action === "archive" || action === "restore") {
+        const saved = perform(() => this.service.setArchived(automationId, target, revision, action === "archive"));
+        return { ...result, definition: saved, message: action === "archive" ? "Automation archived and schedule paused. Sessions and run history retained." : "Automation restored with schedule paused. Sessions unchanged." };
+      }
       if (action === "delete") {
         perform(() => { this.service.delete(automationId, target, revision); });
-        return { ...result, deleted: true, message: "Definition archived; run history and session identities retained. Deletion does not stop or confirm uncertain session work." };
+        return { ...result, deleted: true, message: "Definition deleted; run history and session identities retained. Session deletion is not supported by the host plugin API. Deletion does not stop or confirm uncertain session work." };
       }
       const saved = perform(() => this.service.update(automationId, { ...target, expectedRevision: revision, enabled: action === "enable" }));
       return { ...result, definition: saved, message: action === "enable" ? "Schedule enabled for the successfully tested revision." : "Schedule paused; this does not cancel existing runs." };

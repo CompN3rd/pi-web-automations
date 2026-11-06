@@ -43,10 +43,10 @@ describe("automations chat-tool schema and action validation", () => {
     const declaration = renderToolSignature({ name: tool.name, inputSchema: chatRecord(tool.parameters) });
     expect(exposure).toBe("deferred");
     expect(declaration).not.toContain("args: unknown");
-    expect(declaration).toContain('action: "list" | "inspect" | "create" | "update" | "run" | "enable" | "pause" | "delete" | "cancel"');
+    expect(declaration).toContain('action: "list" | "inspect" | "create" | "update" | "run" | "enable" | "pause" | "archive" | "restore" | "delete" | "cancel"');
     for (const field of ["automationId", "expectedRevision", "draft", "patch", "runId", "projectId", "workspaceId"]) expect(declaration).toContain(`${field}?:`);
     for (const field of ["name", "prompt", "trigger", "model", "thinking"]) expect(declaration).toContain(`${field}:`);
-    expect(declaration).toContain("required for update/run/enable/pause/delete");
+    expect(declaration).toContain("required for update/run/enable/pause/archive/restore/delete");
     expect(declaration).toContain("Required for create only");
     expect(declaration).toContain("Required for update only");
     expect(declaration).toContain("required for cancel together with automationId");
@@ -61,7 +61,7 @@ describe("automations chat-tool schema and action validation", () => {
     { action: "create", draft },
     { action: "create", draft, projectId: "project", workspaceId: "workspace" },
     { action: "update", automationId: "id", expectedRevision: 1, patch: { prompt: "Edited" } },
-    ...["run", "enable", "pause", "delete"].map((action) => ({ action, automationId: "id", expectedRevision: 1 })),
+    ...["run", "enable", "pause", "archive", "restore", "delete"].map((action) => ({ action, automationId: "id", expectedRevision: 1 })),
     { action: "cancel", automationId: "id", runId: "run" },
   ])("validates and forwards $action with exact fields to the hosted machine", async (input) => {
     const f = fixture();
@@ -77,7 +77,7 @@ describe("automations chat-tool schema and action validation", () => {
     [{ action: "create" }, "create requires draft"],
     [{ action: "update", automationId: "id" }, "update requires expectedRevision"],
     [{ action: "update", automationId: "id", expectedRevision: 1 }, "update requires patch"],
-    ...["run", "enable", "pause", "delete"].map((action): [Record<string, JsonValue>, string] => [{ action, automationId: "id" }, `${action} requires expectedRevision`]),
+    ...["run", "enable", "pause", "archive", "restore", "delete"].map((action): [Record<string, JsonValue>, string] => [{ action, automationId: "id" }, `${action} requires expectedRevision`]),
     [{ action: "cancel", automationId: "id" }, "cancel requires runId"],
     [{ action: "create", draft, projectId: "project" }, "BOTH exact projectId/workspaceId"],
     [{ action: "inspect", automationId: " " }, "exact automationId"],

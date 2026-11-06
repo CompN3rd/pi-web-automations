@@ -14,7 +14,7 @@ describe("standalone Automations package metadata", () => {
     const metadata: unknown = JSON.parse(await readFile("package.json", "utf8"));
     const packageRecord = record(metadata);
     expect(packageRecord["name"]).toBe("@compn3rd/pi-web-automations");
-    expect(packageRecord["version"]).toBe("0.2.2");
+    expect(packageRecord["version"]).toBe("0.3.0");
     expect(packageRecord["private"]).toBeUndefined();
     expect(packageRecord["license"]).toBe("MIT");
     expect(packageRecord["type"]).toBe("module");

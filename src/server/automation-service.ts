@@ -187,6 +187,7 @@ export class AutomationService {
   update(id: string, request: UpdateAutomationRequest): AutomationDefinition {
     const workspace = request;
     const current = this.requireDefinition(id, request);
+    if (current.archivedAt !== undefined) throw new AutomationServiceError("Restore the archived automation before editing or enabling it", 409);
     if (current.revision !== request.expectedRevision) throw new AutomationServiceError("Automation was changed by another client", 409);
 
     const definitionChanged = request.name !== undefined
@@ -242,6 +243,18 @@ export class AutomationService {
     }
   }
 
+  setArchived(id: string, scope: AutomationScope, expectedRevision: number, archived: boolean): AutomationDefinition {
+    const definition = this.requireDefinition(id, scope);
+    if (definition.revision !== expectedRevision) throw new AutomationServiceError("Automation was changed by another client", 409);
+    if (!archived && definition.archivedAt === undefined) throw new AutomationServiceError("Automation is not archived; restore requires an archived definition", 409);
+    if ((definition.archivedAt !== undefined) === archived) return definition;
+    try {
+      return this.store.setDefinitionArchived(id, scope.projectId, scope.workspaceId, expectedRevision, archived, this.nowIso());
+    } catch (error) {
+      throw conflictFrom(error);
+    }
+  }
+
   delete(id: string, scope: AutomationScope, expectedRevision: number): void {
     const definition = this.requireDefinition(id, scope);
     if (definition.revision !== expectedRevision) throw new AutomationServiceError("Automation was changed by another client", 409);
@@ -257,6 +270,7 @@ export class AutomationService {
   runNow(id: string, scope: AutomationScope, expectedRevision: number): AutomationRun {
     if (this.stopping) throw new AutomationServiceError("Automations service is stopping", 409);
     const definition = this.requireDefinition(id, scope);
+    if (definition.archivedAt !== undefined) throw new AutomationServiceError("Restore the archived automation before running it", 409);
     if (definition.revision !== expectedRevision) throw new AutomationServiceError("Automation was changed by another client", 409);
     let run: AutomationRun;
     try {

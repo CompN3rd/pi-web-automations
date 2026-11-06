@@ -52,6 +52,35 @@ function context(request: (operation: string, input: JsonValue) => Promise<JsonV
 }
 
 describe("AutomationsController", () => {
+  it("pins initial selection across reordered refreshes and reconciles only when it leaves the view", async () => {
+    const second = { ...definition, id: "automation-2", name: "Other review" };
+    const archived = { ...definition, id: "archived", archivedAt: "2026-01-02T00:00:00Z" };
+    const earlier = { ...definition, id: "earlier", name: "A new review" };
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue(success({ ...snapshot(), definitions: [definition, second, archived] }));
+    const target = context(backend);
+    const controller = new AutomationsController(timerFixture().api);
+    controller.connect(target.value);
+    await controller.refresh(target.value);
+    expect(controller.state(target.value).selectedId).toBe(definition.id);
+    backend.mockResolvedValue(success({ ...snapshot(), definitions: [earlier, second, { ...definition, name: "Z renamed" }, archived] }));
+    await controller.refresh(target.value);
+    expect(controller.state(target.value).selectedId).toBe(definition.id);
+    backend.mockResolvedValue(success({ ...snapshot(), definitions: [earlier, second, archived] }));
+    await controller.refresh(target.value);
+    expect(controller.state(target.value).selectedId).toBe(earlier.id);
+    controller.selectDefinition(target.value, second.id);
+    await controller.refresh(target.value);
+    expect(controller.state(target.value).selectedId).toBe(second.id);
+    controller.showArchived(target.value, true);
+    expect(controller.state(target.value).selectedId).toBe(archived.id);
+    backend.mockResolvedValue(success({ ...snapshot(), definitions: [earlier, second] }));
+    await controller.refresh(target.value);
+    expect(controller.state(target.value).selectedId).toBeUndefined();
+    controller.showArchived(target.value, false);
+    expect(controller.state(target.value).selectedId).toBe(earlier.id);
+    controller.disconnect(target.value);
+  });
+
   it("polls at active and idle rates, then cleans up on disconnect", async () => {
     const delays: number[] = [];
     const cleared: unknown[] = [];

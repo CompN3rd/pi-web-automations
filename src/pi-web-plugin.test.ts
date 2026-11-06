@@ -4,6 +4,7 @@ import type { JsonValue, WorkspacePanelContextV5 } from "@jmfederico/pi-web/plug
 import { html, render, svg } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin from "./browser/pi-web-plugin.js";
+import { chatRecord } from "./browser/chat-protocol.js";
 import { catalogFixture, managementSuccess } from "./browser-test-fixtures.js";
 
 afterEach(() => {
@@ -36,16 +37,17 @@ describe("standalone Automations browser plugin", () => {
       const latest = container.querySelector<HTMLAnchorElement>(".definition-card a");
       expect(latest?.textContent).toBe("Open latest session");
       expect(new URL(latest?.href ?? "").searchParams.get("session")).toBe("session & 1");
+      expect(container.querySelector(".overview-metrics")?.textContent).toContain("All retained history");
+      expect(container.querySelector(".overview-metrics")?.textContent).toContain("$500.0000");
+      expect(container.querySelector(".overview-metrics")?.textContent).toContain("$2.0000");
+      expect(container.querySelector(".overview-metrics")?.textContent).toContain("250 of 300");
+      container.querySelector<HTMLButtonElement>(".activity-link")?.click(); render(panel.render(context), container);
       expect(container.querySelector(".timeline-block")?.getAttribute("aria-label")).toContain("Fixed job · completed");
       expect(container.querySelector(".timeline-block")?.getAttribute("style")).toContain("height:100%");
       expect(container.querySelectorAll(".timeline-lane")).toHaveLength(1);
       expect(container.querySelectorAll(".timeline-tick")).toHaveLength(5);
       expect(container.querySelector(".timeline-heading strong")?.textContent).toBe("Fixed job");
       expect(new URL(container.querySelector<HTMLAnchorElement>("a.timeline-block")?.href ?? "").searchParams.get("session")).toBe("session & 1");
-      expect(container.querySelector(".cost-summary")?.textContent).toContain("all retained history");
-      expect(container.querySelector(".cost-summary")?.textContent).toContain("$500.0000");
-      expect(container.querySelector(".cost-summary")?.textContent).toContain("$2.0000");
-      expect(container.querySelector(".cost-summary")?.textContent).toContain("250 of 300");
       expect(container.querySelector("tbody a")?.textContent).toBe("Open session");
     } finally { render(null, container); }
   });
@@ -75,6 +77,7 @@ describe("standalone Automations browser plugin", () => {
     const container = document.createElement("div"); document.body.append(container);
     try {
       render(panel.render(context), container); await settle(); render(panel.render(context), container);
+      container.querySelector<HTMLButtonElement>(".activity-link")?.click(); render(panel.render(context), container);
       const lanes = container.querySelectorAll(".timeline-lane");
       expect(lanes).toHaveLength(2);
       expect(lanes[0]?.getAttribute("aria-label")).toBe("Fixed job");
@@ -87,6 +90,141 @@ describe("standalone Automations browser plugin", () => {
       expect(fixedBlocks?.[1]?.style.height).toBe(otherBlock?.style.height);
       expect(fixedBlocks?.[1]?.getAttribute("tabindex")).toBe("0");
       expect(container.querySelector(".timeline-time-heading")?.textContent).toBe("Time ↓");
+    } finally { render(null, container); }
+  });
+
+  it("groups selection, configuration and archived lifecycle controls in one detail view", async () => {
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const panel = activation.contributions.workspacePanels?.[0];
+    if (!panel) throw new Error("Expected Automations panel");
+    let definitions = [fixedDefinition(), fixedDefinition({ id: "second", name: "Second job", prompt: "Second prompt" }), fixedDefinition({ id: "archived", name: "Old job", revision: 2, archivedAt: "2026-01-02T00:00:00Z" })];
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockImplementation((operation, input) => {
+      if (operation === "manage") {
+        const action = chatRecord(input)["action"];
+        if (action === "archive") definitions = [fixedDefinition({ revision: 2, archivedAt: "2026-01-02T00:00:00Z" }), ...definitions.slice(1)];
+        if (action === "restore") definitions = [fixedDefinition({ revision: 3 }), ...definitions.slice(1)];
+        return Promise.resolve(managementSuccess);
+      }
+      return Promise.resolve(successSnapshot(definitions));
+    });
+    const context = panelContext(backend);
+    const container = document.createElement("div"); document.body.append(container);
+    const redraw = async () => { await settle(); render(panel.render(context), container); };
+    const click = async (label: string) => {
+      const button = [...container.querySelectorAll("button")].find((item) => item.textContent.trim() === label);
+      if (!button) throw new Error(`Missing ${label}`);
+      button.click(); await redraw();
+    };
+    try {
+      await redraw(); await redraw();
+      expect(container.querySelectorAll(".automation-list-item")).toHaveLength(2);
+      expect(container.querySelectorAll(".definition-card")).toHaveLength(1);
+      expect(container.querySelector(".definition-card h3")?.textContent).toBe("Fixed job");
+      await click("Configuration");
+      expect(container.querySelector(".configuration pre")?.textContent).toBe("Review");
+      container.querySelectorAll<HTMLButtonElement>(".automation-list-item")[1]?.click(); await redraw();
+      expect(container.querySelector(".configuration pre")?.textContent).toBe("Second prompt");
+      container.querySelectorAll<HTMLButtonElement>(".automation-list-item")[0]?.click(); await redraw();
+      await click("Archive");
+      expect(backend.mock.calls.filter(([operation]) => operation === "manage")).toHaveLength(0);
+      expect(container.querySelector(".lifecycle-confirmation")?.textContent).toContain("Sessions are retained");
+      await click("Cancel");
+      expect(container.querySelector(".lifecycle-confirmation")).toBeNull();
+      await click("Archive"); await click("Confirm archive");
+      expect(backend).toHaveBeenCalledWith("manage", { action: "archive", automationId: "created", expectedRevision: 1 });
+      expect(container.querySelectorAll(".automation-list-item")).toHaveLength(1);
+      await click("Archived · 2");
+      expect(container.querySelectorAll(".automation-list-item")).toHaveLength(2);
+      expect(container.querySelector(".definition-card h3")?.textContent).toBe("Fixed job");
+      expect([...container.querySelectorAll(".definition-actions button")].map((button) => button.textContent.trim())).toEqual(["Restore paused", "Delete"]);
+      await click("Restore paused");
+      expect(backend).toHaveBeenCalledWith("manage", { action: "restore", automationId: "created", expectedRevision: 2 });
+      await click("Current · 2");
+      await click("Delete");
+      expect(container.querySelector(".lifecycle-confirmation")?.textContent).toContain("cannot be undone");
+      await click("Confirm delete");
+      expect(backend).toHaveBeenCalledWith("manage", { action: "delete", automationId: "created", expectedRevision: 3 });
+    } finally { render(null, container); }
+  });
+
+  it("keeps the initially displayed automation selected after rename and refresh reordering", async () => {
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const panel = activation.contributions.workspacePanels?.[0];
+    if (!panel) throw new Error("Expected Automations panel");
+    let definitions = [fixedDefinition({ name: "A job" }), fixedDefinition({ id: "second", name: "B job" })];
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockImplementation((operation, input) => {
+      if (operation === "manage") {
+        if (chatRecord(input)["action"] === "update") definitions = [fixedDefinition({ id: "second", name: "B job" }), fixedDefinition({ name: "Z job", revision: 2 })];
+        return Promise.resolve(managementSuccess);
+      }
+      return Promise.resolve(successSnapshot(definitions));
+    });
+    const context = panelContext(backend);
+    const container = document.createElement("div"); document.body.append(container);
+    const redraw = async () => { await settle(); render(panel.render(context), container); };
+    try {
+      await redraw(); await redraw();
+      expect(container.querySelector(".definition-card h3")?.textContent).toBe("A job");
+      [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "Edit")?.click(); await redraw();
+      const name = [...container.querySelectorAll("label")].find((label) => label.textContent.trim().startsWith("Name"))?.querySelector("input");
+      if (!name) throw new Error("Missing Name input");
+      name.value = "Z job"; name.dispatchEvent(new Event("input", { bubbles: true }));
+      container.querySelector<HTMLFormElement>("form")?.requestSubmit(); await redraw();
+      expect(container.querySelector(".definition-card h3")?.textContent).toBe("Z job");
+      expect(container.querySelector('.automation-list-item[aria-current="true"] strong')?.textContent).toBe("Z job");
+      definitions = [fixedDefinition({ id: "earlier", name: "A new job" }), ...definitions];
+      [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "Refresh")?.click(); await redraw();
+      expect(container.querySelector(".definition-card h3")?.textContent).toBe("Z job");
+      [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "Run now / test")?.click(); await redraw();
+      expect(backend).toHaveBeenCalledWith("manage", { action: "run", automationId: "created", expectedRevision: 2 });
+    } finally { render(null, container); }
+  });
+
+  it("preserves a keyboard focus anchor after opening history and cancelling confirmations", async () => {
+    const activation = plugin.activate({ apiVersion: 5, pluginId: "automations", runtimePluginId: "automations", html, svg, signal: new AbortController().signal, lifetimeSignal: new AbortController().signal });
+    const panel = activation.contributions.workspacePanels?.[0];
+    if (!panel) throw new Error("Expected Automations panel");
+    const backend = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue(successSnapshot([fixedDefinition()]));
+    const context = panelContext(backend);
+    const container = document.createElement("div"); document.body.append(container);
+    const redraw = async () => { await settle(); render(panel.render(context), container); };
+    try {
+      await redraw(); await redraw();
+      const history = [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "View run history");
+      if (!history) throw new Error("Missing history button");
+      history.focus(); history.click(); await redraw();
+      expect(container.contains(history)).toBe(false);
+      expect(document.activeElement).toBe(container.querySelector('[data-detail-tab="runs"]'));
+      expect(document.activeElement?.getAttribute("aria-pressed")).toBe("true");
+      for (const action of ["archive", "delete"]) {
+        const opener = container.querySelector<HTMLButtonElement>(`[data-lifecycle-action="${action}"]`);
+        if (!opener) throw new Error("Missing lifecycle button");
+        opener.focus(); opener.click(); await redraw();
+        const cancel = [...container.querySelectorAll<HTMLButtonElement>(".lifecycle-confirmation button")].find((button) => button.textContent.trim() === "Cancel");
+        if (!cancel) throw new Error("Missing confirmation Cancel");
+        cancel.focus(); cancel.click(); await redraw();
+        expect(container.querySelector(".lifecycle-confirmation")).toBeNull();
+        expect(document.activeElement).toBe(opener);
+      }
+      for (const action of ["archive", "delete"]) {
+        backend.mockResolvedValue(successSnapshot([fixedDefinition()]));
+        [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "Refresh")?.click(); await redraw();
+        container.querySelector<HTMLButtonElement>(`[data-lifecycle-action="${action}"]`)?.click(); await redraw();
+        backend.mockResolvedValue(successSnapshot([fixedDefinition()], [{
+          id: "active", automationId: "created", automationRevision: 1, automationName: "Fixed job",
+          projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/repo", source: "manual",
+          scheduledFor: "2026-01-01T00:00:00Z", queuedAt: "2026-01-01T00:00:00Z",
+          status: "running", prompt: "Review", trigger: { type: "manual" }, configuredModel: { mode: "default" }, configuredThinking: { mode: "default" }, timeoutMs: 600000,
+        }]));
+        [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "Refresh")?.click(); await redraw();
+        expect(container.querySelector<HTMLButtonElement>(`[data-lifecycle-action="${action}"]`)?.disabled).toBe(true);
+        const cancel = [...container.querySelectorAll<HTMLButtonElement>(".lifecycle-confirmation button")].find((button) => button.textContent.trim() === "Cancel");
+        if (!cancel) throw new Error("Missing confirmation Cancel after refresh");
+        cancel.focus(); cancel.click(); await redraw();
+        expect(container.querySelector(".lifecycle-confirmation")).toBeNull();
+        expect(document.activeElement).toBe(container.querySelector('[data-detail-tab="runs"]'));
+      }
+      expect(backend.mock.calls.filter(([operation]) => operation === "manage")).toHaveLength(0);
     } finally { render(null, container); }
   });
 
@@ -167,7 +305,8 @@ describe("standalone Automations browser plugin", () => {
     expect(backend).toHaveBeenCalledWith("snapshot", { contractVersion: 1, limit: 200 });
     expect(requestRender).toHaveBeenCalled();
     expect(container.textContent).toContain("Automations");
-    expect(container.textContent).toContain("No automations yet");
+    expect(container.textContent).toContain("No current automations");
+    container.querySelector<HTMLButtonElement>(".activity-link")?.click(); render(panel.render(paired), container);
     expect(container.textContent).toContain("Recent runs");
     expect(container.querySelectorAll("button").length).toBeGreaterThan(0);
 
@@ -190,22 +329,23 @@ function panelContext(request: ((operation: string, input: JsonValue) => Promise
   };
 }
 
-function fixedDefinition(): JsonValue {
+function fixedDefinition(patch: Record<string, JsonValue> = {}): JsonValue {
   return {
     id: "created", projectId: "project-1", workspaceId: "workspace-1", workspacePath: "/repo",
     name: "Fixed job", prompt: "Review", enabled: false, revision: 1,
     model: { mode: "fixed", provider: "evaluation", id: "fixed" }, thinking: { mode: "fixed", level: "high" },
     trigger: { type: "manual" }, timeoutMs: 600_000, abortGraceMs: 15_000,
     createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+    ...patch,
   };
 }
 
-function successSnapshot(definitions: JsonValue[] = []): JsonValue {
+function successSnapshot(definitions: JsonValue[] = [], runs: JsonValue[] = []): JsonValue {
   return {
     contractVersion: 1,
     ok: true,
     value: {
-      definitions, runs: [], models: [], thinkingLevels: ["off", "low", "medium", "high"],
+      definitions, runs, models: [], thinkingLevels: ["off", "low", "medium", "high"],
       defaultTimeoutMs: 600_000, minTimeoutMs: 60_000, maxTimeoutMs: 86_400_000, generatedAt: "2026-01-01T00:00:00.000Z",
     },
   };

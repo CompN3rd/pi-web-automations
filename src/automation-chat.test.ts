@@ -374,7 +374,7 @@ describe("host companion backend management boundary", () => {
     await expect(f.query({ action: "enable", automationId, expectedRevision: 1 })).rejects.toThrow("successfully before enabling");
   });
 
-  it.each(["inspect", "update", "run", "enable", "pause", "delete", "cancel"])("resolves only the stored target workspace for %s", async (action) => {
+  it.each(["inspect", "update", "run", "enable", "pause", "archive", "restore", "delete", "cancel"])("resolves only the stored target workspace for %s", async (action) => {
     const f = await fixture("remote-1");
     const original = f.resolve.getMockImplementation(); if (!original) throw new Error("Missing resolver");
     f.resolve.mockClear();
@@ -385,12 +385,47 @@ describe("host companion backend management boundary", () => {
     const request = action === "inspect" ? { action, automationId } : action === "cancel" ? { action, automationId, runId: "missing-run" } : input;
     if (action === "enable") await expect(f.query(request)).rejects.toThrow("successfully before enabling");
     else if (action === "cancel") await expect(f.query(request)).rejects.toThrow("run not found");
+    else if (action === "restore") await expect(f.query(request)).rejects.toThrow("not archived");
     else await f.query(request);
     expect(f.resolve).toHaveBeenCalled();
     expect(f.resolve.mock.calls.every(([scope]) => scope.projectId === "p-a-other" && scope.workspaceId === "a-other")).toBe(true);
     f.resolve.mockClear();
     await expect(f.query({ action: "inspect", automationId: "missing-id" })).rejects.toThrow("not found");
     expect(f.resolve).not.toHaveBeenCalled();
+  });
+
+  it("archives and restores through shared management without creating or removing sessions", async () => {
+    const f = await fixture("local");
+    const automationId = String(f.saved[0]?.["id"]);
+    const archived = chatRecord((await f.query({ action: "archive", automationId, expectedRevision: 1 }))["details"]);
+    expect(archived).toMatchObject({ definition: { enabled: false, revision: 2 } });
+    expect(typeof chatRecord(archived["definition"])["archivedAt"]).toBe("string");
+    expect(archived["message"]).toContain("Sessions and run history retained");
+    const listing = chatRecord((await f.query({ action: "list", projectId: "p-a-other", workspaceId: "a-other" }))["details"]);
+    expect(listing).toMatchObject({ workspaces: [{ definitions: [{ id: automationId, revision: 2, enabled: false }] }] });
+    await expect(f.query({ action: "run", automationId, expectedRevision: 2 })).rejects.toThrow("Restore");
+    const restored = chatRecord((await f.query({ action: "restore", automationId, expectedRevision: 2 }))["details"]);
+    expect(restored).toMatchObject({ definition: { enabled: false, revision: 3 } });
+    expect(chatRecord(restored["definition"])["archivedAt"]).toBeUndefined();
+    expect(f.createSession).not.toHaveBeenCalled();
+  });
+
+  it("does not report a paused restore for an already-current enabled schedule", async () => {
+    const f = await fixture("local");
+    const automationId = String(f.saved[0]?.["id"]);
+    const store = f.fixtureStore();
+    const definition = store.getDefinition(automationId);
+    if (!definition) throw new Error("Missing fixture");
+    store.replaceDefinition({ ...definition, testedRevision: definition.revision, trigger: { type: "interval", intervalMs: 60_000 } }, definition.revision);
+    await f.query({ action: "archive", automationId, expectedRevision: 1 });
+    await f.query({ action: "restore", automationId, expectedRevision: 2 });
+    await f.query({ action: "enable", automationId, expectedRevision: 3 });
+    const before = store.getDefinition(automationId);
+    expect(before?.enabled).toBe(true);
+    expect(before?.nextRunAt).toBeDefined();
+    await expect(f.query({ action: "restore", automationId, expectedRevision: 3 })).rejects.toThrow("not archived");
+    expect(store.getDefinition(automationId)).toEqual(before);
+    expect(f.createSession).not.toHaveBeenCalled();
   });
 
   it("cancels queued work without execution and rejects action after connection closure", async () => {
@@ -416,7 +451,7 @@ describe("host companion backend management boundary", () => {
     expect(store.getDefinition(automationId)).toMatchObject({ revision: 1 });
   });
 
-  it.each(["run", "enable", "pause", "delete", "cancel"])("re-resolves action authority and rejects malformed/stale %s requests", async (action) => {
+  it.each(["run", "enable", "pause", "archive", "restore", "delete", "cancel"])("re-resolves action authority and rejects malformed/stale %s requests", async (action) => {
     const f = await fixture("remote-1");
     const automationId = String(f.saved[0]?.["id"]);
     const input = { action, automationId, ...(action === "cancel" ? { runId: "exact-run" } : { expectedRevision: 1 }) };

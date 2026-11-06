@@ -41,6 +41,31 @@ afterEach(() => {
 });
 
 describe("AutomationStore", () => {
+  it("persists reversible archives separately from deletions across reopen", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-web-automation-archive-"));
+    tempRoots.push(root);
+    const path = join(root, "automations.sqlite");
+    const first = new AutomationStore(path);
+    stores.push(first);
+    const automation = first.insertDefinition(definition({ enabled: true, testedRevision: 1, nextRunAt: "2026-07-24T12:00:00.000Z" }));
+    const archived = first.setDefinitionArchived(automation.id, automation.projectId, automation.workspaceId, 1, true, "2026-07-24T12:01:00.000Z");
+    expect(archived).toMatchObject({ enabled: false, revision: 2, testedRevision: 2, archivedAt: "2026-07-24T12:01:00.000Z" });
+    first.close();
+    const reopened = new AutomationStore(path);
+    stores.push(reopened);
+    expect(reopened.getDefinition(automation.id)).toEqual(archived);
+    expect(reopened.listDefinitions(automation.projectId, automation.workspaceId)).toEqual([archived]);
+    expect(reopened.listDueDefinitions("2099-01-01T00:00:00.000Z")).toEqual([]);
+    expect(() => reopened.claimScheduledOccurrence(automation, undefined, automation.createdAt, "stale-schedule")).toThrow("schedule changed");
+    expect(() => reopened.setDefinitionArchived(automation.id, automation.projectId, automation.workspaceId, 1, false, automation.createdAt)).toThrow("changed by another client");
+    const restored = reopened.setDefinitionArchived(automation.id, automation.projectId, automation.workspaceId, 2, false, "2026-07-24T12:02:00.000Z");
+    expect(restored).toMatchObject({ enabled: false, revision: 3, testedRevision: 3 });
+    expect(restored.archivedAt).toBeUndefined();
+    expect(restored.nextRunAt).toBeUndefined();
+    reopened.archiveDefinition(automation.id, automation.projectId, automation.workspaceId, "2026-07-24T12:03:00.000Z");
+    expect(reopened.getDefinition(automation.id)).toBeUndefined();
+  });
+
   it("opens a better-sqlite3 0.1.2 database preserving definitions, history, usage and recovery fences", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-web-automation-legacy-"));
     tempRoots.push(root);

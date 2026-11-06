@@ -53,6 +53,11 @@ export interface AutomationPanelState {
   error: string | undefined;
   notice: string | undefined;
   editor?: AutomationEditor;
+  selectedId?: string;
+  showArchived?: boolean;
+  detailTab?: "overview" | "runs" | "configuration";
+  workspaceActivity?: boolean;
+  confirmation?: { definition: AutomationDefinition; action: "archive" | "delete" };
   targets?: AutomationTarget[];
   targetError?: string;
   targetSequence: number;
@@ -120,6 +125,7 @@ export class AutomationsController {
       .then((snapshot) => {
         if (!this.accepts(state, context, sequence)) return;
         state.snapshot = snapshot;
+        this.reconcileSelection(state);
         state.error = undefined;
       })
       .catch((error: unknown) => {
@@ -233,6 +239,60 @@ export class AutomationsController {
     }, enabled ? "Automation enabled" : "Automation paused");
   }
 
+  selectDefinition(context: WorkspacePanelContextV5, id: string): void {
+    const state = this.stateFor(context);
+    state.selectedId = id;
+    state.workspaceActivity = false;
+    delete state.confirmation;
+    this.render(state);
+  }
+
+  showArchived(context: WorkspacePanelContextV5, archived: boolean): void {
+    const state = this.stateFor(context);
+    state.showArchived = archived;
+    state.workspaceActivity = false;
+    delete state.selectedId;
+    this.reconcileSelection(state);
+    delete state.confirmation;
+    this.render(state);
+  }
+
+  showDetailTab(context: WorkspacePanelContextV5, tab: "overview" | "runs" | "configuration"): void {
+    const state = this.stateFor(context);
+    state.detailTab = tab;
+    this.render(state);
+  }
+
+  showWorkspaceActivity(context: WorkspacePanelContextV5): void {
+    const state = this.stateFor(context);
+    state.workspaceActivity = true;
+    delete state.confirmation;
+    this.render(state);
+  }
+
+  confirmLifecycle(context: WorkspacePanelContextV5, definition?: AutomationDefinition, action: "archive" | "delete" = "delete"): void {
+    const state = this.stateFor(context);
+    if (definition) state.confirmation = { definition, action };
+    else delete state.confirmation;
+    this.render(state);
+  }
+
+  async applyLifecycle(context: WorkspacePanelContextV5): Promise<void> {
+    const state = this.stateFor(context);
+    const confirmation = state.confirmation;
+    if (!confirmation || state.mutating) return;
+    if (confirmation.action === "delete") await this.delete(context, confirmation.definition);
+    else await this.setArchived(context, confirmation.definition, true);
+    if (state.error === undefined) delete state.confirmation;
+    this.render(state);
+  }
+
+  setArchived(context: WorkspacePanelContextV5, definition: AutomationDefinition, archived: boolean): Promise<void> {
+    return this.mutate(context, {
+      action: archived ? "archive" : "restore", automationId: definition.id, expectedRevision: definition.revision,
+    }, archived ? "Automation archived; sessions retained" : "Automation restored with schedule paused");
+  }
+
   delete(context: WorkspacePanelContextV5, definition: AutomationDefinition): Promise<void> {
     return this.mutate(context, {
       action: "delete", automationId: definition.id, expectedRevision: definition.revision,
@@ -247,6 +307,7 @@ export class AutomationsController {
 
   private async mutate(context: WorkspacePanelContextV5, input: JsonValue, notice: string): Promise<void> {
     const state = this.stateFor(context);
+    if (state.mutating) return;
     state.mutating = true;
     state.error = undefined;
     state.notice = undefined;
@@ -321,6 +382,14 @@ export class AutomationsController {
     const created: AutomationPanelState = { context, loading: false, mutating: false, error: undefined, notice: undefined, targetSequence: 0, retained: true, requestSequence: 0, request: undefined };
     this.states.set(key, created);
     return created;
+  }
+
+  private reconcileSelection(state: AutomationPanelState): void {
+    const visible = state.snapshot?.definitions.filter((definition) => (definition.archivedAt !== undefined) === (state.showArchived === true)) ?? [];
+    if (visible.some((definition) => definition.id === state.selectedId)) return;
+    const first = visible[0];
+    if (first === undefined) delete state.selectedId;
+    else state.selectedId = first.id;
   }
 
   private clearTimer(): void {

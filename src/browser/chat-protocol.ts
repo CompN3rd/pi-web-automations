@@ -11,9 +11,9 @@ export function validateAutomationAction(value: unknown): Record<string, unknown
   const required = action === "list" ? [] : action === "inspect" ? ["automationId"]
     : action === "create" ? ["draft"]
     : action === "update" ? ["automationId", "expectedRevision", "patch"]
-    : ["run", "enable", "pause", "delete"].includes(action) ? ["automationId", "expectedRevision"]
+    : ["run", "enable", "pause", "archive", "restore", "delete"].includes(action) ? ["automationId", "expectedRevision"]
     : action === "cancel" ? ["automationId", "runId"] : undefined;
-  if (!required) throw new Error("Use list, inspect, create, update, run, enable, pause, delete, or cancel");
+  if (!required) throw new Error("Use list, inspect, create, update, run, enable, pause, archive, restore, delete, or cancel");
   const allowed = ["action", ...required, ...(["list", "create"].includes(action) ? ["projectId", "workspaceId"] : [])];
   const unexpected = Object.keys(input).find((key) => !allowed.includes(key));
   if (unexpected !== undefined) throw new Error(`Unexpected automation ${action} field: ${unexpected}`);

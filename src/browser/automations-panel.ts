@@ -68,7 +68,6 @@ function renderPanel(html: HtmlTemplateTag, controller: AutomationsController, c
       ${state.notice === undefined ? null : html`<div class="message" role="status">${state.notice}</div>`}
       ${state.editor === undefined ? null : renderEditor(html, controller, context, state)}
       ${renderDefinitions(html, controller, context, state)}
-      ${renderRuns(html, controller, context, state)}
     </section>
   `;
 }
@@ -151,9 +150,26 @@ function renderModelEditor(html: HtmlTemplateTag, controller: AutomationsControl
 function renderDefinitions(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, state: AutomationPanelState) {
   const definitions = state.snapshot?.definitions;
   if (definitions === undefined) return html`<p class="empty">${state.loading ? "Loading automations…" : "Automations unavailable."}</p>`;
-  if (definitions.length === 0) return html`<section><h3>Definitions</h3><p class="empty">No automations yet. Create a disabled draft, run it successfully, then enable its schedule.</p></section>`;
+  const archived = state.showArchived === true;
+  const visible = definitions.filter((definition) => (definition.archivedAt !== undefined) === archived);
+  const selected = visible.find((definition) => definition.id === state.selectedId);
   return html`
-    <section><h3>Definitions</h3><div class="cards">${definitions.map((definition) => renderDefinition(html, controller, context, state, definition))}</div></section>
+    <section class="automation-workbench" aria-label="Automation management">
+      <nav class="automation-list" aria-label="Automations">
+        <div class="view-switch" aria-label="Automation view">
+          <button type="button" aria-pressed=${!archived} @click=${() => { controller.showArchived(context, false); }}>Current · ${definitions.filter((definition) => definition.archivedAt === undefined).length}</button>
+          <button type="button" aria-pressed=${archived} @click=${() => { controller.showArchived(context, true); }}>Archived · ${definitions.filter((definition) => definition.archivedAt !== undefined).length}</button>
+        </div>
+        ${visible.length === 0 ? html`<p class="empty">${archived ? "No archived automations." : "No current automations. Create a disabled draft, test it, then enable its schedule."}</p>` : visible.map((definition) => html`
+          <button type="button" class="automation-list-item" aria-current=${state.workspaceActivity !== true && selected?.id === definition.id ? "true" : "false"} @click=${() => { controller.selectDefinition(context, definition.id); }}>
+            <strong>${definition.name}</strong><span class="list-state">${definition.archivedAt !== undefined ? "Archived" : definition.enabled ? "Enabled" : "Paused"} · ${formatTrigger(definition.trigger)}</span>
+          </button>`)}
+        <button type="button" class="activity-link" aria-pressed=${state.workspaceActivity === true} @click=${() => { controller.showWorkspaceActivity(context); }}>Workspace activity</button>
+      </nav>
+      <div class="automation-detail">
+        ${state.workspaceActivity === true ? renderRuns(html, controller, context, state) : selected === undefined ? html`<p class="empty">${archived ? "Archived automations can be restored here. Restoring leaves scheduling paused." : "Select an automation to see its overview, runs, and configuration."}</p>` : renderDefinition(html, controller, context, state, selected)}
+      </div>
+    </section>
   `;
 }
 
@@ -161,28 +177,51 @@ function renderDefinition(html: HtmlTemplateTag, controller: AutomationsControll
   const tested = definition.testedRevision === definition.revision;
   const runs = (state.snapshot?.runs ?? []).filter((run) => run.automationId === definition.id);
   const latestSession = [...runs].filter((run) => run.sessionId !== undefined).sort((a, b) => b.queuedAt.localeCompare(a.queuedAt))[0];
+  const latestRun = [...runs].sort((a, b) => b.queuedAt.localeCompare(a.queuedAt))[0];
+  const archived = definition.archivedAt !== undefined;
+  const tab = state.detailTab ?? "overview";
+  const blocked = runs.some((run) => activeRun(run) || run.status === "unknown");
   const statistics = state.snapshot?.costStatistics;
   const stats = statistics?.find((entry) => entry.automationId === definition.id) ?? { count: 0, priced: 0, totalMicros: 0 };
   const costs = statistics === undefined ? costSummary(runs) : { count: stats.count, priced: stats.priced, total: stats.priced === 0 ? undefined : stats.totalMicros, average: stats.priced === 0 ? undefined : stats.totalMicros / stats.priced };
   return html`
     <article class="definition-card" style=${`border-top:3px solid ${automationColor(definition.id)}`}>
-      <header><div><h4>${definition.name}</h4>${definition.description === undefined ? null : html`<p>${definition.description}</p>`}</div><span class=${definition.enabled ? "status enabled" : "status"}>${definition.enabled ? "enabled" : "paused"}</span></header>
-      <dl><div><dt>Schedule</dt><dd>${formatTrigger(definition.trigger)}</dd></div><div><dt>Model</dt><dd>${formatModel(definition.model)}</dd></div><div><dt>Thinking</dt><dd>${formatThinking(definition.thinking)}</dd></div><div><dt>Revision</dt><dd>${definition.revision}${tested ? " · tested" : " · needs test"}</dd></div><div><dt>Next run</dt><dd>${definition.nextRunAt === undefined ? "—" : formatDate(definition.nextRunAt)}</dd></div></dl>
-      <div class="cost-summary"><strong>Estimated costs · ${statistics === undefined ? "recent history" : "all retained history"}</strong><dl><div><dt>Total</dt><dd>${formatCost(costs.total)}</dd></div><div><dt>Average / priced run</dt><dd>${formatCost(costs.average)}</dd></div></dl><small>${costs.priced} of ${costs.count} runs have cost data. Includes partial usage.${statistics === undefined ? " Limited to loaded history." : ""}</small></div>
-      ${latestSession === undefined ? null : renderSessionLink(html, context, latestSession, "Open latest session")}
-      <details><summary>Prompt</summary><pre>${definition.prompt}</pre></details>
-      <div class="actions">
-        <button type="button" ?disabled=${state.mutating} @click=${() => { void controller.runNow(context, definition); }}>Run now / test</button>
-        <button type="button" ?disabled=${state.mutating} @click=${() => { controller.beginEdit(context, definition); }}>Edit</button>
-        <button type="button" ?disabled=${state.mutating || (!definition.enabled && !tested)} title=${!definition.enabled && !tested ? "Run this exact revision successfully before enabling" : ""} @click=${() => { void controller.setEnabled(context, definition, !definition.enabled); }}>${definition.enabled ? "Pause" : "Enable"}</button>
-        <button type="button" class="danger" ?disabled=${state.mutating} @click=${() => { if (globalThis.confirm(`Delete ${definition.name}? Run history is retained.`)) void controller.delete(context, definition); }}>Delete</button>
+      <header><div><h3>${definition.name}</h3>${definition.description === undefined ? null : html`<p>${definition.description}</p>`}</div><span class=${definition.enabled ? "status enabled" : "status"}>${archived ? "archived" : definition.enabled ? "enabled" : "paused"}</span></header>
+      <div class="actions definition-actions">
+        ${archived ? html`<button type="button" class="primary" ?disabled=${state.mutating} @click=${() => { void controller.setArchived(context, definition, false); }}>Restore paused</button>` : html`
+          <button type="button" class="primary" ?disabled=${state.mutating} @click=${() => { void controller.runNow(context, definition); }}>Run now / test</button>
+          <button type="button" ?disabled=${state.mutating || (!definition.enabled && !tested)} title=${!definition.enabled && !tested ? "Run this exact revision successfully before enabling" : ""} @click=${() => { void controller.setEnabled(context, definition, !definition.enabled); }}>${definition.enabled ? "Pause" : "Enable"}</button>
+          <button type="button" ?disabled=${state.mutating} @click=${() => { controller.beginEdit(context, definition); }}>Edit</button>
+          <button type="button" data-lifecycle-action="archive" ?disabled=${state.mutating || blocked} title="Archive pauses scheduling; active or unconfirmed runs must settle first" @click=${() => { controller.confirmLifecycle(context, definition, "archive"); }}>Archive</button>`}
+        <button type="button" class="danger" data-lifecycle-action="delete" ?disabled=${state.mutating || runs.some(activeRun)} @click=${() => { controller.confirmLifecycle(context, definition, "delete"); }}>Delete</button>
       </div>
+      ${state.confirmation?.definition.id !== definition.id ? null : html`
+        <section class="lifecycle-confirmation" aria-label=${`Confirm ${state.confirmation.action}`}>
+          <h4>${state.confirmation.action === "delete" ? "Delete" : "Archive"} ${state.confirmation.definition.name}?</h4>
+          <p>${state.confirmation.action === "delete" ? "This removes the definition from management and cannot be undone. Run history is retained." : "Scheduling will pause and this automation will move to Archived. You can restore it later with scheduling paused."}</p>
+          <p class="session-retention">Sessions are retained. Also ${state.confirmation.action === "delete" ? "deleting" : "archiving"} automation sessions is unavailable: this version of PI WEB does not expose that operation to plugins.</p>
+          <div class="actions"><button type="button" class=${state.confirmation.action === "delete" ? "danger" : "primary"} ?disabled=${state.mutating} @click=${() => { void controller.applyLifecycle(context); }}>Confirm ${state.confirmation.action}</button><button type="button" ?disabled=${state.mutating} @click=${(event: Event) => { focusDetailControl(event, `[data-lifecycle-action="${state.confirmation?.action ?? ""}"]`); controller.confirmLifecycle(context); }}>Cancel</button></div>
+        </section>`}
+      <nav class="detail-tabs" aria-label="Automation details">
+        ${([ ["overview", "Overview"], ["runs", "Runs"], ["configuration", "Configuration"] ] as const).map(([id, label]) => html`<button type="button" data-detail-tab=${id} aria-pressed=${tab === id} @click=${() => { controller.showDetailTab(context, id); }}>${label}</button>`)}
+      </nav>
+      ${tab === "overview" ? html`
+        <section class="schedule-summary"><h4>Schedule</h4><p>${formatTrigger(definition.trigger)}</p><small>${archived ? `Archived ${formatDate(definition.archivedAt ?? "")}` : definition.nextRunAt === undefined ? "No scheduled run" : `Next run ${formatDate(definition.nextRunAt)}`} · Revision ${definition.revision}${tested ? " tested" : " needs test"}</small></section>
+        <section class="overview-metrics" aria-label="Run and cost summary">
+          <div><h4>Latest run</h4><strong>${latestRun?.status.replaceAll("_", " ") ?? "No runs yet"}</strong><small>${latestRun === undefined ? "Run a test to get started" : `${formatDate(latestRun.queuedAt)} · ${formatDuration(latestRun)}`}</small>${latestSession === undefined ? null : renderSessionLink(html, context, latestSession, "Open latest session")}</div>
+          <div><h4>Estimated total</h4><strong>${formatCost(costs.total)}</strong><small>${costs.priced} of ${costs.count} runs priced</small></div>
+          <div><h4>Average / priced run</h4><strong>${formatCost(costs.average)}</strong><small>${statistics === undefined ? "Recent loaded history" : "All retained history"}</small></div>
+        </section>
+        <p class="usage-note">Estimated costs include partial usage.${statistics === undefined ? " Limited to loaded history." : ""}</p>
+        <section class="recent-sessions"><header><h4>Recent runs</h4><button type="button" @click=${(event: Event) => { focusDetailControl(event, '[data-detail-tab="runs"]'); controller.showDetailTab(context, "runs"); }}>View run history</button></header>
+          ${runs.length === 0 ? html`<p class="empty">No runs yet.</p>` : [...runs].sort((a, b) => b.queuedAt.localeCompare(a.queuedAt)).slice(0, 5).map((run) => html`<div class="recent-run"><span><span class=${`run-status ${run.status}`}>${run.status.replaceAll("_", " ")}</span><small>${formatDate(run.queuedAt)} · ${formatDuration(run)}</small></span>${renderRunDetails(html, context, run)}${activeRun(run) ? html`<button type="button" ?disabled=${state.mutating || run.status === "cancelling"} @click=${() => { void controller.cancelRun(context, run); }}>Cancel</button>` : null}</div>`)}
+        </section>` : tab === "runs" ? renderRuns(html, controller, context, state, runs) : html`
+        <section class="configuration"><h4>Execution settings</h4><dl><div><dt>Model</dt><dd>${formatModel(definition.model)}</dd></div><div><dt>Thinking</dt><dd>${formatThinking(definition.thinking)}</dd></div><div><dt>Timeout</dt><dd>${minutes(definition.timeoutMs)} minutes</dd></div><div><dt>Target</dt><dd>${definition.projectId} / ${definition.workspaceId}</dd></div><div><dt>Revision</dt><dd>${definition.revision}${tested ? " · tested" : " · needs test"}</dd></div></dl><h4>Prompt</h4><pre>${definition.prompt}</pre></section>`}
     </article>
   `;
 }
 
-function renderRuns(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, state: AutomationPanelState) {
-  const runs = state.snapshot?.runs ?? [];
+function renderRuns(html: HtmlTemplateTag, controller: AutomationsController, context: WorkspacePanelContextV5, state: AutomationPanelState, runs = state.snapshot?.runs ?? []) {
   return html`
     <section class="runs"><h3>Recent runs</h3>
       ${renderTimeline(html, context, runs)}
@@ -225,6 +264,16 @@ function renderRunDetails(html: HtmlTemplateTag, context: WorkspacePanelContextV
   return html`${run.error === undefined ? null : html`<span class="run-error">${run.error}</span>`}${run.reason === undefined ? null : html`<small>Reason: ${run.reason}</small>`}${renderSessionLink(html, context, run)}${run.attempt?.forceStopped === true ? html`<small>Force stop requested; outcome unconfirmed.</small>` : null}`;
 }
 
+// Move focus before the host redraw removes an inline navigation/confirmation control.
+// These destination controls persist across the corresponding detail-view update.
+function focusDetailControl(event: Event, selector: string): void {
+  if (!(event.currentTarget instanceof HTMLElement)) return;
+  const card = event.currentTarget.closest(".definition-card");
+  const origin = card?.querySelector<HTMLElement>(selector);
+  const destination = origin !== null && origin !== undefined && !origin.matches(":disabled") ? origin : card?.querySelector<HTMLElement>('[data-detail-tab="runs"]');
+  destination?.focus();
+}
+
 function activeRun(run: AutomationRun): boolean { return ["queued", "starting", "running", "cancelling"].includes(run.status); }
 function minutes(ms: number): number { return Math.max(1, Math.round(ms / 60_000)); }
 function formatDate(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString(); }
@@ -258,9 +307,29 @@ class AutomationsActivityElement extends HTMLElement {
 function defineActivityElement(): void { if (customElements.get(activityElementTag) === undefined) customElements.define(activityElementTag, AutomationsActivityElement); }
 
 const styles = `
-.automations-panel a{color:var(--color-link,#79b8ff)}.cost-summary{display:grid;gap:6px;font-size:12px}.run-timeline{border:1px solid var(--color-border);border-radius:8px;padding:12px;margin-bottom:14px}.timeline-scroll{overflow-x:auto;padding:4px 3px 8px;margin:10px 0}.timeline-grid{display:grid;grid-template-rows:auto var(--timeline-height)}.timeline-heading{display:flex;align-items:center;gap:6px;padding:8px;min-width:0;font-size:12px;border-bottom:1px solid var(--color-border)}.timeline-heading strong{overflow-wrap:anywhere}.timeline-heading i{flex:none;width:10px;height:10px;border-radius:2px}.timeline-time-heading{color:var(--color-text-muted)}.timeline-axis{position:relative;height:var(--timeline-height);font-size:11px;color:var(--color-text-muted)}.timeline-tick{position:absolute;left:0;right:8px;transform:translateY(-50%);overflow-wrap:anywhere}.timeline-tick:first-child{transform:none}.timeline-tick:last-child{transform:translateY(-100%)}.timeline-lane{position:relative;height:var(--timeline-height);border-left:1px solid var(--color-border)}.timeline-gridline{position:absolute;left:0;right:0;border-top:1px solid var(--color-border);pointer-events:none}.timeline-gridline:last-of-type{transform:translateY(-1px)}.timeline-block{position:absolute;border-radius:3px;box-sizing:border-box;opacity:.85}.timeline-block:hover,.timeline-block:focus-visible{opacity:1;outline:2px solid var(--color-text);outline-offset:1px;z-index:1}
+.automations-panel a{color:var(--color-link,#79b8ff)}.run-timeline{border:1px solid var(--color-border);border-radius:8px;padding:12px;margin-bottom:14px}.timeline-scroll{overflow-x:auto;padding:4px 3px 8px;margin:10px 0}.timeline-grid{display:grid;grid-template-rows:auto var(--timeline-height)}.timeline-heading{display:flex;align-items:center;gap:6px;padding:8px;min-width:0;font-size:12px;border-bottom:1px solid var(--color-border)}.timeline-heading strong{overflow-wrap:anywhere}.timeline-heading i{flex:none;width:10px;height:10px;border-radius:2px}.timeline-time-heading{color:var(--color-text-muted)}.timeline-axis{position:relative;height:var(--timeline-height);font-size:11px;color:var(--color-text-muted)}.timeline-tick{position:absolute;left:0;right:8px;transform:translateY(-50%);overflow-wrap:anywhere}.timeline-tick:first-child{transform:none}.timeline-tick:last-child{transform:translateY(-100%)}.timeline-lane{position:relative;height:var(--timeline-height);border-left:1px solid var(--color-border)}.timeline-gridline{position:absolute;left:0;right:0;border-top:1px solid var(--color-border);pointer-events:none}.timeline-gridline:last-of-type{transform:translateY(-1px)}.timeline-block{position:absolute;border-radius:3px;box-sizing:border-box;opacity:.85}.timeline-block:hover,.timeline-block:focus-visible{opacity:1;outline:2px solid var(--color-text);outline-offset:1px;z-index:1}
 
-.automations-panel{padding:16px;display:grid;gap:18px;color:var(--color-text)} h2,h3,h4,p{margin:0}.automations-toolbar,.automations-toolbar>div,.definition-card header,.automation-editor header{display:flex;align-items:center;justify-content:space-between;gap:12px}.automations-toolbar p,.automation-editor header span,small,.empty{color:var(--color-text-muted);font-size:12px}.actions{display:flex;gap:8px;flex-wrap:wrap}button,input,select,textarea{font:inherit}button{border:1px solid var(--color-border);background:var(--color-bg-secondary);color:inherit;border-radius:6px;padding:6px 10px;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}button.danger{color:var(--color-danger,#e66)}.message{padding:9px 12px;border:1px solid var(--color-border);border-radius:6px}.message.error,.run-error{color:var(--color-danger,#e66)}.automation-editor,.definition-card{border:1px solid var(--color-border);border-radius:8px;padding:14px;display:grid;gap:12px;background:var(--color-bg-secondary)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.form-grid label{display:grid;gap:5px;font-size:13px}.form-grid .wide{grid-column:1/-1}input,select,textarea{box-sizing:border-box;width:100%;border:1px solid var(--color-border);background:var(--color-bg);color:inherit;border-radius:5px;padding:7px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-top:9px}.definition-card header{align-items:flex-start}.definition-card header p{color:var(--color-text-muted);margin-top:3px}.status,.run-status{border-radius:999px;padding:3px 7px;background:var(--color-bg);font-size:11px;white-space:nowrap}.status.enabled,.run-status.completed{color:var(--color-success,#6c6)}.run-status.failed,.run-status.timed_out,.run-status.unknown{color:var(--color-danger,#e66)}dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}dl div{min-width:0}dt{font-size:11px;color:var(--color-text-muted)}dd{margin:2px 0 0;font-size:13px;overflow-wrap:anywhere}details pre{white-space:pre-wrap;max-height:180px;overflow:auto}.runs h3{margin-bottom:9px}.table-scroll{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px}caption{text-align:left;color:var(--color-text-muted);padding-bottom:6px}th,td{text-align:left;vertical-align:top;padding:8px;border-bottom:1px solid var(--color-border)}td small{display:block;margin-top:3px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:700px){.automations-toolbar{align-items:flex-start;flex-direction:column}.cards{grid-template-columns:1fr}dl{grid-template-columns:1fr}}
+.automations-panel{padding:16px;display:grid;gap:18px;color:var(--color-text)}
+.automations-panel :is(h2,h3,h4,p){margin:0}
+.automations-toolbar,.definition-card header,.automation-editor header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.automations-toolbar p,.automation-editor header span,.automations-panel small,.automations-panel .empty{color:var(--color-text-muted);font-size:12px}
+.automations-panel .actions{display:flex;gap:8px;flex-wrap:wrap}
+.automations-panel :is(button,input,select,textarea){font:inherit}
+:where(.automations-panel) button{border:1px solid var(--color-border);background:var(--color-bg-secondary);color:inherit;border-radius:6px;padding:6px 10px;cursor:pointer}
+.automations-panel button:disabled{opacity:.5;cursor:not-allowed}
+.automations-panel button.danger{color:var(--color-danger,#e66)}
+.automations-panel .message{padding:9px 12px;border:1px solid var(--color-border);border-radius:6px}
+.automations-panel .message.error,.run-error{color:var(--color-danger,#e66)}
+.automation-editor,.definition-card{border:1px solid var(--color-border);border-radius:8px;padding:14px;display:grid;gap:12px;background:var(--color-bg-secondary)}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.form-grid label{display:grid;gap:5px;font-size:13px}.form-grid .wide{grid-column:1/-1}
+.automations-panel :is(input,select,textarea){box-sizing:border-box;width:100%;border:1px solid var(--color-border);background:var(--color-bg);color:inherit;border-radius:5px;padding:7px}
+.definition-card header{align-items:flex-start}.definition-card header p{color:var(--color-text-muted);margin-top:3px}
+.status,.run-status{border-radius:999px;padding:3px 7px;background:var(--color-bg);font-size:11px;white-space:nowrap}.status.enabled,.run-status.completed{color:var(--color-success,#6c6)}.run-status.failed,.run-status.timed_out,.run-status.unknown{color:var(--color-danger,#e66)}
+.automations-panel dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.automations-panel dl div{min-width:0}.automations-panel dt{font-size:11px;color:var(--color-text-muted)}.automations-panel dd{margin:2px 0 0;font-size:13px;overflow-wrap:anywhere}
+.runs h3{margin-bottom:9px}.table-scroll{overflow:auto}.automations-panel table{width:100%;border-collapse:collapse;font-size:12px}.automations-panel caption{text-align:left;color:var(--color-text-muted);padding-bottom:6px}.automations-panel :is(th,td){text-align:left;vertical-align:top;padding:8px;border-bottom:1px solid var(--color-border)}.automations-panel td small{display:block;margin-top:3px}
+.automations-panel .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:700px){.automations-toolbar{align-items:flex-start;flex-direction:column}.automations-panel dl{grid-template-columns:1fr}}
+.automations-panel{font-size:14px;gap:20px;min-width:0}.automations-toolbar>div:first-child{display:block}.automations-toolbar h2{font-size:22px;font-weight:650;letter-spacing:-.025em}.automations-toolbar p{margin-top:4px}.automation-workbench{display:grid;grid-template-columns:minmax(200px,260px) minmax(0,1fr);border:1px solid var(--color-border);border-radius:10px;overflow:hidden;min-height:420px}.automation-list{border-right:1px solid var(--color-border);padding:12px;display:flex;flex-direction:column;gap:6px;background:var(--color-bg-secondary);min-width:0}.view-switch{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}.view-switch button{font-size:12px;padding:6px 8px}.view-switch button[aria-pressed=true],.detail-tabs button[aria-pressed=true]{color:var(--color-link,#79b8ff);border-color:var(--color-link,#79b8ff)}.automation-list-item{display:block;text-align:left;padding:12px;border:1px solid transparent;background:transparent;overflow-wrap:anywhere}.automation-list-item strong{display:block;font-size:13px;font-weight:600}.automation-list-item .list-state{display:block;color:var(--color-text-muted);font-size:11px;margin-top:5px}.automation-list-item[aria-current=true]{background:var(--color-bg);border-color:var(--color-border);box-shadow:inset 3px 0 var(--color-link,#79b8ff)}.activity-link{margin-top:14px;text-align:left;font-size:12px}.automation-detail{min-width:0;padding:22px}.automation-detail>.definition-card{border:0;border-radius:0;padding:0;background:transparent;gap:22px}.definition-card h3{font-size:22px;line-height:1.3;font-weight:650;letter-spacing:-.025em;overflow-wrap:anywhere}.definition-card header p{font-size:13px;line-height:1.6;max-width:65ch;margin-top:6px}.definition-actions{gap:6px}.automations-panel button.primary{background:var(--color-link,#79b8ff);color:var(--color-bg,#101318);border-color:var(--color-link,#79b8ff);font-weight:600}.detail-tabs{display:flex;gap:6px;border-bottom:1px solid var(--color-border);padding-bottom:10px;flex-wrap:wrap}.detail-tabs button{font-size:12px;background:transparent}.schedule-summary h4,.overview-metrics h4{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--color-text-muted);font-weight:500}.schedule-summary p{font-size:16px;margin:6px 0}.overview-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;border-block:1px solid var(--color-border);padding:18px 0}.overview-metrics>div{display:grid;align-content:start;gap:7px;min-width:0}.overview-metrics strong{font-size:18px;font-weight:600;overflow-wrap:anywhere}.overview-metrics small,.overview-metrics a{font-size:11px}.usage-note{font-size:11px;color:var(--color-text-muted);margin-top:-14px}.recent-sessions{display:grid;gap:10px}.recent-sessions h4,.configuration h4{font-size:14px;font-weight:600}.recent-run{display:flex;align-items:start;gap:12px;justify-content:space-between;border-bottom:1px solid var(--color-border);padding:10px 0;font-size:12px;overflow-wrap:anywhere}.recent-run small{display:block;margin-top:6px}.configuration{display:grid;gap:18px}.configuration pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6;border:1px solid var(--color-border);border-radius:6px;padding:14px;max-height:420px;overflow:auto;margin:0}.lifecycle-confirmation{border:1px solid var(--color-border);border-radius:8px;padding:16px;display:grid;gap:12px}.lifecycle-confirmation p{font-size:13px;line-height:1.6}.session-retention{color:var(--color-text-muted)}.automations-panel button:focus-visible,.automations-panel a:focus-visible{outline:2px solid var(--color-link,#79b8ff);outline-offset:3px}.automation-detail>.empty{padding:12px}.automation-list>.empty{padding:12px;line-height:1.6}@media(max-width:850px){.automation-workbench{grid-template-columns:minmax(170px,210px) minmax(0,1fr)}.automation-detail{padding:16px}.overview-metrics{grid-template-columns:1fr;gap:16px}.overview-metrics strong{font-size:16px}}@media(max-width:600px){.automation-workbench{grid-template-columns:minmax(0,1fr)}.automation-list{border-right:0;border-bottom:1px solid var(--color-border);max-height:280px;overflow:auto}.automation-detail{padding:16px}.definition-card h3{font-size:20px}.recent-run{flex-wrap:wrap}}
 `;
 
 export { hasActiveRuns };
